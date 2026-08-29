@@ -256,7 +256,7 @@ class AlexLightStudioPanel extends HTMLElement {
     this._error = null;
     this._renderRoomList();
     try {
-      const result = await this._hass.callWS({ type: "alex_scene_studio/get_rooms" });
+      const result = await this._hass.callWS({ type: "alex_light_studio/get_rooms" });
       this._rooms = (result && result.rooms) || [];
     } catch (err) {
       this._error = (err && err.message) || String(err);
@@ -1250,7 +1250,7 @@ class AlexLightStudioPanel extends HTMLElement {
       el.addEventListener("click", async (ev) => {
         ev.stopPropagation();
         const roomId = el.getAttribute("data-del-room");
-        await this._hass.callWS({ type: "alex_scene_studio/delete_room", room_id: roomId });
+        await this._hass.callWS({ type: "alex_light_studio/delete_room", room_id: roomId });
         if (this._editingRoomId === roomId) {
           this._resetEditor();
           this._syncEditorInputs();
@@ -1264,7 +1264,7 @@ class AlexLightStudioPanel extends HTMLElement {
 
   async _generateScene() {
     const payload = {
-      type: "alex_scene_studio/compute_scene",
+      type: "alex_light_studio/compute_scene",
       lights: this._lights.map(lightPayload),
       zones: this._zones.map(zonePayload),
       scheme: this._sceneUseMood ? "analogous" : this._sceneScheme, // ignore cote serveur si mood fourni
@@ -1347,7 +1347,7 @@ class AlexLightStudioPanel extends HTMLElement {
     const btn = this.shadowRoot.querySelector("#apply-scene-btn");
     if (btn) btn.textContent = "Application en cours…";
     try {
-      const result = await this._hass.callWS({ type: "alex_scene_studio/apply_scene", suggestions: this._suggestions });
+      const result = await this._hass.callWS({ type: "alex_light_studio/apply_scene", suggestions: this._suggestions });
       console.log("Alex Scene Studio - apply_scene résultat :", result);
     } catch (err) {
       console.error("Alex Scene Studio - échec de apply_scene :", err);
@@ -1369,7 +1369,7 @@ class AlexLightStudioPanel extends HTMLElement {
       // qu'elles refletent bien la proposition avant de creer la scene.
       await this._applyScene();
       const result = await this._hass.callWS({
-        type: "alex_scene_studio/save_as_ha_scene",
+        type: "alex_light_studio/save_as_ha_scene",
         scene_name: sceneName,
         entity_ids: this._suggestions.map((s) => s.entity_id),
       });
@@ -1392,7 +1392,7 @@ class AlexLightStudioPanel extends HTMLElement {
       return;
     }
     const payload = {
-      type: "alex_scene_studio/save_room",
+      type: "alex_light_studio/save_room",
       name: this._roomName.trim(),
       points: this._points.map((p) => ({ x: p.x, y: p.y })),
       lights: this._lights.map(lightPayload),
