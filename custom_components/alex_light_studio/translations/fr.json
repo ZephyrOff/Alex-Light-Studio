@@ -1,0 +1,13 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Alex Light Studio",
+        "description": "Configure Alex Light Studio : dessine le plan de tes pièces et positionne tes lumières pour obtenir des suggestions de scènes harmonieuses (vues Pièces/Scènes), et sauvegarde/rejoue des dégradés de bandeaux LED Philips Hue Gradient ou Aqara LED Strip T1 via Zigbee2MQTT (vue Gradient)."
+      }
+    },
+    "abort": {
+      "already_configured": "Déjà configuré"
+    }
+  }
+}

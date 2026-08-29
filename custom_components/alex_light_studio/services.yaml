@@ -1,0 +1,98 @@
+save_scene:
+  name: Enregistrer une scène de dégradé
+  description: >-
+    Enregistre le dégradé actuellement testé comme une scène réutilisable,
+    sous forme de points d'ancrage indépendants du nombre de segments —
+    rejouable ensuite sur n'importe quel bandeau, quel que soit son nombre
+    réel de segments.
+  fields:
+    name:
+      name: Nom
+      description: Nom de la scène (utilisé pour la charger et l'identifier plus tard).
+      required: true
+      example: "Coucher de soleil"
+      selector:
+        text:
+    colors:
+      name: Couleurs
+      description: >-
+        Liste des couleurs actuellement affichées, dans l'ordre, une par
+        segment (hex, ex. #ff6b35) — supposées également espacées le long
+        du bandeau d'origine.
+      required: true
+      example: ["#ff6b35", "#f7c548", "#ffe066", "#c04cfd", "#5e60ce"]
+      selector:
+        object:
+
+load_scene:
+  name: Charger une scène de dégradé
+  description: >-
+    Applique une scène de dégradé enregistrée sur un bandeau précis, en
+    adaptant automatiquement le nombre de couleurs envoyées à son nombre
+    réel de segments (par interpolation).
+  fields:
+    entity_id:
+      name: Lumière
+      description: Entité du bandeau/lampe à piloter.
+      required: true
+      selector:
+        entity:
+          domain: light
+    name:
+      name: Nom de la scène
+      description: Nom de la scène enregistrée à charger.
+      required: true
+      example: "Coucher de soleil"
+      selector:
+        text:
+    device_type:
+      name: Type d'appareil
+      description: Détermine le format du message envoyé à Zigbee2MQTT.
+      required: true
+      selector:
+        select:
+          options:
+            - label: Philips Hue Gradient
+              value: hue
+            - label: Aqara LED Strip T1
+              value: aqara
+    friendly_name:
+      name: Nom convivial Z2M
+      description: >-
+        Nom utilisé dans le topic MQTT, si différent du nom de l'entité HA.
+        Vide = déduit du nom de l'entité.
+      required: false
+      selector:
+        text:
+    length_entity:
+      name: Entité longueur du bandeau (Aqara)
+      description: >-
+        À renseigner uniquement si le nom ne suit pas la convention standard
+        (number.<entité>_length) — sinon déduite automatiquement.
+      required: false
+      selector:
+        entity:
+          domain: number
+    segments:
+      name: Nombre de segments (repli)
+      description: >-
+        Obligatoire en pratique pour Hue (aucune détection automatique
+        possible côté Z2M) ; sert de repli pour Aqara si la détection
+        automatique échoue.
+      required: false
+      selector:
+        number:
+          min: 2
+          max: 50
+          mode: box
+
+delete_scene:
+  name: Supprimer une scène de dégradé
+  description: Supprime définitivement une scène enregistrée.
+  fields:
+    name:
+      name: Nom
+      description: Nom de la scène à supprimer.
+      required: true
+      selector:
+        text:

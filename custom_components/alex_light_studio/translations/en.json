@@ -1,0 +1,13 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Alex Light Studio",
+        "description": "Configure Alex Light Studio: draw your room floor plans and position your lights to get harmonious scene suggestions (Room/Scenes views), and save/replay gradients for Philips Hue Gradient or Aqara LED Strip T1 light strips via Zigbee2MQTT (Gradient view)."
+      }
+    },
+    "abort": {
+      "already_configured": "Already configured"
+    }
+  }
+}
