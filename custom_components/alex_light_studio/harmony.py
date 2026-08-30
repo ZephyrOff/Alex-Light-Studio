@@ -226,6 +226,20 @@ def _spatial_hue(normalized_height: float, hue_slots: list[float]) -> float:
     return _lerp_hue(hue_slots[lo], hue_slots[hi], local_t)
 
 
+def _nearest_hue_slot(position: float, hue_slots: list[float]) -> float:
+    """Version DISCRETE de _spatial_hue : au lieu d'interpoler en continu
+    entre deux teintes adjacentes (melange qui produit une moyenne visuelle
+    entre deux couleurs), "accroche" a la plus proche. Utilisee pour le
+    mode image : l'utilisateur a pointe des couleurs PRECISES sur une
+    photo, une lumiere doit ressembler a L'UNE d'elles (ou une variante
+    proche via l'influence des zones), jamais a un melange flou entre deux."""
+    n = len(hue_slots)
+    if n == 1:
+        return hue_slots[0]
+    idx = round(max(0.0, min(1.0, position)) * (n - 1))
+    return hue_slots[max(0, min(n - 1, idx))]
+
+
 def _linear_falloff(distance: float, radius: float) -> float:
     """Influence lineaire (section 7.1 du document) : 1 a distance nulle,
     decroit jusqu'a 0 au rayon indique."""
@@ -382,17 +396,41 @@ def compute_scene(
         direction_sign = rng.choice((1, -1))
         hue_slots = _hue_scheme(resolved_hue, scheme, direction_sign)
 
+    is_image_mode = bool(image_palette)
+
     heights = [light.height for light in lights]
     min_height, max_height = (min(heights), max(heights)) if heights else (0.0, 0.0)
     height_span = max_height - min_height
+
+    xs = [light.x for light in lights]
+    ys = [light.y for light in lights]
+    min_x, max_x = (min(xs), max(xs)) if xs else (0.0, 0.0)
+    min_y, max_y = (min(ys), max(ys)) if ys else (0.0, 0.0)
+    x_span = max_x - min_x
+    y_span = max_y - min_y
 
     suggestions: list[LightSuggestion] = []
     for light in lights:
         role_weights = derive_role_weights(light.position, light.direction)
 
-        # --- Teinte : degrade de base par hauteur, puis influence des zones proches ---
+        # --- Teinte : degrade de base sur position combinee, puis influence des zones proches ---
         normalized_height = 0.5 if height_span <= 0 else (light.height - min_height) / height_span
-        base_hue_val = _spatial_hue(normalized_height, hue_slots)
+        norm_x = 0.5 if x_span <= 0 else (light.x - min_x) / x_span
+        norm_y = 0.5 if y_span <= 0 else (light.y - min_y) / y_span
+        # Position combinee sur les 3 axes (hauteur + position horizontale)
+        # -- heuristique simple (moyenne des 3 axes normalises), pas une
+        # projection geometrique parfaite sur la diagonale de la piece,
+        # mais suffisante pour garantir que deux lumieres a la meme hauteur
+        # (meme montage/direction, donc meme role) ne recoivent plus
+        # systematiquement une teinte IDENTIQUE des qu'elles sont eloignees
+        # l'une de l'autre dans la piece -- l'axe hauteur seul ignorait
+        # totalement leur position horizontale.
+        gradient_position = (normalized_height + norm_x + norm_y) / 3
+        base_hue_val = (
+            _nearest_hue_slot(gradient_position, hue_slots)
+            if is_image_mode
+            else _spatial_hue(gradient_position, hue_slots)
+        )
         base_sat_val = sum(w * ROLE_BASE_SATURATION[r] for r, w in role_weights.items()) * (resolved_sat / 60.0)
 
         hue, sat = _blend_hue_sat_with_zones(base_hue_val, base_sat_val, light.x, light.y, zones)

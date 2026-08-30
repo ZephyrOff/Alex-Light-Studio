@@ -79,14 +79,21 @@ deux bibliothèques distinctes :
   sélecteur de couleur (ou curseur de température pour les lumières
   blanches) et son curseur de luminosité, directement dans la liste
   d'aperçu. La proposition automatique est un point de départ, pas un
-  résultat figé.
+  résultat figé. Le « Rendu en direct » s'applique aussi à ces
+  ajustements individuels (seule la lumière modifiée est réappliquée, pas
+  toute la scène à chaque geste).
 - **Génération depuis une image** — troisième mode de génération, à côté de
   « Ambiance prédéfinie » et « Teinte libre » : glisse une image (ou
   clique pour en choisir une), puis place 2 à 8 points directement dessus
-  pour échantillonner les couleurs à ces endroits précis. La palette
-  obtenue sert de dégradé de base pour la pièce, exactement comme le
-  ferait une ambiance prédéfinie — compatible avec le style de génération
-  (Doux/Normal/Dynamique/Explosif) et les zones à influence chromatique.
+  pour échantillonner les couleurs à ces endroits précis. Chaque lumière
+  s'accroche à l'une des couleurs pointées (jamais un mélange moyen entre
+  plusieurs) — compatible avec le style de génération et les zones à
+  influence chromatique.
+- **Position horizontale prise en compte** — deux lumières qui partagent
+  exactement les mêmes propriétés (hauteur, type de montage, direction)
+  reçoivent désormais des teintes différentes si elles sont éloignées
+  l'une de l'autre dans la pièce, plutôt que la même teinte automatiquement
+  du seul fait de propriétés identiques.
 
 ## Cartes Lovelace
 

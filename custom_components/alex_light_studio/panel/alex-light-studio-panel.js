@@ -1479,6 +1479,7 @@ class AlexLightStudioPanel extends HTMLElement {
         this._suggestions[idx].hue = hue;
         this._suggestions[idx].saturation = saturation;
         this._renderCanvas();
+        this._liveApplySingleSuggestion(this._suggestions[idx]);
       });
     });
     list.querySelectorAll(".scene-kelvin-input").forEach((input) => {
@@ -1486,6 +1487,7 @@ class AlexLightStudioPanel extends HTMLElement {
         const idx = parseInt(ev.target.getAttribute("data-index"), 10);
         this._suggestions[idx].color_temp_kelvin = parseInt(ev.target.value, 10);
         this._renderCanvas();
+        this._liveApplySingleSuggestion(this._suggestions[idx]);
       });
     });
     list.querySelectorAll(".scene-brightness-input").forEach((input) => {
@@ -1496,10 +1498,26 @@ class AlexLightStudioPanel extends HTMLElement {
         const valueLabel = input.parentElement.querySelector(".scene-brightness-value");
         if (valueLabel) valueLabel.textContent = `${Math.round((value / 255) * 100)}%`;
         this._renderCanvas();
+        this._liveApplySingleSuggestion(this._suggestions[idx]);
       });
     });
 
     if (applyActions) applyActions.style.display = "flex";
+  }
+
+  // Applique UNE seule lumiere directement (pas tout _applyScene, qui
+  // reappellerait un service pour chaque lumiere de la piece a chaque
+  // pixel de glissement d'un curseur) -- seulement quand "Rendu en direct"
+  // est coche.
+  _liveApplySingleSuggestion(s) {
+    if (!this._liveApply) return;
+    const data = { entity_id: s.entity_id, brightness: s.brightness };
+    if (s.color_temp_kelvin != null) {
+      data.color_temp_kelvin = s.color_temp_kelvin;
+    } else {
+      data.hs_color = [s.hue, s.saturation];
+    }
+    this._hass.callService("light", "turn_on", data);
   }
 
   async _applyScene() {
