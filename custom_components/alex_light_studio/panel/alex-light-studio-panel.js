@@ -63,6 +63,37 @@ function hsvToCss(hue, saturation, brightness) {
 }
 
 // Approximation Kelvin -> CSS pour l'apercu des lumieres sans RGB (juste
+// Conversion RGB (0-255 chacun) -> {hue, saturation} -- partagee entre le
+// picker couleur de l'apercu de scene (via hex) et l'echantillonnage de
+// pixels sur une image (getImageData renvoie du RGB brut directement).
+function rgbToHueSat(r, g, b) {
+  r /= 255;
+  g /= 255;
+  b /= 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const d = max - min;
+  let hue = 0;
+  if (d !== 0) {
+    if (max === r) hue = ((g - b) / d) % 6;
+    else if (max === g) hue = (b - r) / d + 2;
+    else hue = (r - g) / d + 4;
+    hue *= 60;
+    if (hue < 0) hue += 360;
+  }
+  const saturation = max === 0 ? 0 : (d / max) * 100;
+  return { hue, saturation };
+}
+
+// Conversion inverse de hsvToCss -- necessaire quand l'utilisateur choisit
+// une nouvelle couleur via <input type="color"> dans l'apercu de scene
+// modifiable ; la luminosite (value) n'est pas extraite ici, elle reste
+// geree separement par son propre curseur.
+function hexToHueSat(hex) {
+  const h = (hex || "#ffffff").replace("#", "");
+  return rgbToHueSat(parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16));
+}
+
 // color_temp) -- pas une conversion colorimetrique precise, juste de quoi
 // distinguer visuellement chaud/neutre/froid dans l'apercu.
 function kelvinToCss(kelvin) {
@@ -205,7 +236,7 @@ class AlexLightStudioPanel extends HTMLElement {
     // Section Scene (phase 2) : parametres de generation + derniere
     // proposition calculee (jamais appliquee tant que l'utilisateur n'a pas
     // clique sur Appliquer).
-    this._sceneUseMood = true;
+    this._sceneGenMode = "mood"; // "mood" | "manual" | "image"
     this._sceneMood = "energique";
     this._sceneScheme = "analogous";
     this._sceneManualHue = 200;
@@ -215,6 +246,10 @@ class AlexLightStudioPanel extends HTMLElement {
     this._sceneManualWhiteTemp = 2700;
     this._sceneGenerationStyle = "normal"; // "doux" | "normal" | "dynamique" | "explosif" -- independant du mode mood/manuel
     this._liveApply = false; // si coche, la generation applique immediatement aux vraies lumieres
+
+    // Generation depuis une image.
+    this._sceneImageDataUrl = null; // pour reafficher apres un re-render de la coquille
+    this._sceneImagePoints = []; // [{x, y (fractions 0-1 de l'image), hue, saturation}]
     this._suggestions = null; // liste de {entity_id, hue, saturation, brightness, color_temp_kelvin} ou null
     this._previewMode = false;
 
@@ -449,6 +484,27 @@ class AlexLightStudioPanel extends HTMLElement {
           .light-item { flex-wrap: wrap; }
           .stop-cell input[type="color"] { width: 40px; height: 40px; }
         }
+
+        /* --- Generation de scene depuis une image ---------------------- */
+        .image-dropzone {
+          border: 2px dashed var(--divider-color, #444); border-radius: 12px;
+          padding: 32px 16px; text-align: center; cursor: pointer;
+          color: var(--secondary-text-color); font-size: 13px;
+        }
+        .image-dropzone.dragover { border-color: var(--primary-color, #03a9f4); background: rgba(3,169,244,.08); }
+        .scene-image-canvas-wrap { position: relative; border-radius: 10px; overflow: hidden; }
+        #scene-image-canvas { width: 100%; display: block; cursor: crosshair; }
+        .scene-image-point-marker {
+          position: absolute; width: 24px; height: 24px; margin-left: -12px; margin-top: -12px;
+          border-radius: 50%; border: 2px solid white; cursor: pointer;
+          box-shadow: 0 1px 4px rgba(0,0,0,.6);
+          display: flex; align-items: center; justify-content: center;
+          font-size: 11px; font-weight: 700; color: white; text-shadow: 0 1px 2px rgba(0,0,0,.9);
+        }
+        .scene-image-palette-row {
+          display: flex; align-items: center; gap: 10px; padding: 6px 8px;
+          border: 1px solid var(--divider-color, #333); border-radius: 8px; margin-bottom: 6px; font-size: 12px;
+        }
       </style>
 
       <div class="header">
@@ -503,7 +559,7 @@ class AlexLightStudioPanel extends HTMLElement {
             </div>
           </div>
 
-          <div class="card" id="lights-card" style="display:none;">
+          <div class="card" id="lights-card" style="display:none;margin-top:20px;">
             <h2>Positionner les lumières</h2>
             <div class="row">
               <label>Lumière</label>
@@ -598,6 +654,7 @@ class AlexLightStudioPanel extends HTMLElement {
               <select id="scene-mode-select">
                 <option value="mood">Ambiance prédéfinie</option>
                 <option value="manual">Teinte libre</option>
+                <option value="image">Depuis une image</option>
               </select>
             </div>
             <div class="row">
@@ -658,6 +715,26 @@ class AlexLightStudioPanel extends HTMLElement {
                 (faible = rendu uniforme façon quotidien, élevé = rendu marqué façon soirée). La température
                 de blanc sert de base commune pour toutes les lumières sans RGB — chacune s'en écarte
                 légèrement selon son rôle, pour rester une famille cohérente plutôt que des écarts abrupts.
+              </div>
+            </div>
+            <div id="scene-image-fields" style="display:none;">
+              <div id="scene-image-dropzone" class="image-dropzone">
+                <span id="scene-image-dropzone-text">Glisse une image ici, ou clique pour en choisir une</span>
+                <input type="file" id="scene-image-file-input" accept="image/*" style="display:none;" />
+              </div>
+              <div id="scene-image-preview-wrap" style="display:none;margin-top:10px;">
+                <div class="scene-image-canvas-wrap" id="scene-image-canvas-wrap">
+                  <canvas id="scene-image-canvas"></canvas>
+                </div>
+                <div class="actions" style="margin-top:8px;">
+                  <button class="btn btn-outline" id="scene-image-clear-points-btn">Vider les points</button>
+                  <button class="btn btn-outline" id="scene-image-change-btn">Changer d'image</button>
+                </div>
+                <div class="hint">
+                  Clique sur l'image pour placer un point de couleur (2 à 8) — la teinte est échantillonnée
+                  directement au pixel cliqué. Clique sur un repère déjà placé pour le retirer.
+                </div>
+                <div id="scene-image-palette-list" style="margin-top:8px;"></div>
               </div>
             </div>
             <div class="row" style="align-items:center;">
@@ -778,9 +855,10 @@ class AlexLightStudioPanel extends HTMLElement {
     this._updateDerivedRolePreview();
 
     this.shadowRoot.querySelector("#scene-mode-select").addEventListener("change", (ev) => {
-      this._sceneUseMood = ev.target.value === "mood";
-      this.shadowRoot.querySelector("#scene-mood-fields").style.display = this._sceneUseMood ? "block" : "none";
-      this.shadowRoot.querySelector("#scene-manual-fields").style.display = this._sceneUseMood ? "none" : "block";
+      this._sceneGenMode = ev.target.value;
+      this.shadowRoot.querySelector("#scene-mood-fields").style.display = this._sceneGenMode === "mood" ? "block" : "none";
+      this.shadowRoot.querySelector("#scene-manual-fields").style.display = this._sceneGenMode === "manual" ? "block" : "none";
+      this.shadowRoot.querySelector("#scene-image-fields").style.display = this._sceneGenMode === "image" ? "block" : "none";
     });
     this.shadowRoot.querySelector("#scene-mood-select").addEventListener("change", (ev) => {
       this._sceneMood = ev.target.value;
@@ -812,6 +890,7 @@ class AlexLightStudioPanel extends HTMLElement {
     this.shadowRoot.querySelector("#generate-scene-btn").addEventListener("click", () => this._generateScene());
     this.shadowRoot.querySelector("#apply-scene-btn").addEventListener("click", () => this._applyScene());
     this.shadowRoot.querySelector("#save-ha-scene-btn").addEventListener("click", () => this._saveAsHaScene());
+    this._wireSceneImageInputs();
 
     const svg = this.shadowRoot.querySelector("#plan");
     svg.addEventListener("click", (ev) => this._onCanvasClick(ev));
@@ -1304,15 +1383,22 @@ class AlexLightStudioPanel extends HTMLElement {
   }
 
   async _generateScene() {
+    if (this._sceneGenMode === "image" && this._sceneImagePoints.length < 1) {
+      alert("Place au moins un point de couleur sur l'image avant de générer.");
+      return;
+    }
+
     const payload = {
       type: "alex_light_studio/compute_scene",
       lights: this._lights.map(lightPayload),
       zones: this._zones.map(zonePayload),
-      scheme: this._sceneUseMood ? "analogous" : this._sceneScheme, // ignore cote serveur si mood fourni
+      scheme: this._sceneGenMode === "manual" ? this._sceneScheme : "analogous", // ignore cote serveur si mood/image fourni
       generation_style: this._sceneGenerationStyle,
     };
-    if (this._sceneUseMood) {
+    if (this._sceneGenMode === "mood") {
       payload.mood = this._sceneMood;
+    } else if (this._sceneGenMode === "image") {
+      payload.image_palette = this._sceneImagePoints.map((p) => [p.hue, p.saturation]);
     } else {
       payload.base_hue = this._sceneManualHue;
       payload.saturation = this._sceneManualSat;
@@ -1359,23 +1445,59 @@ class AlexLightStudioPanel extends HTMLElement {
       return;
     }
 
+    // Chaque ligne reste modifiable individuellement APRES la generation --
+    // la proposition automatique est un point de depart, pas un resultat
+    // figé : couleur (lumieres RGB) ou temperature (lumieres blanches) et
+    // luminosite s'ajustent directement ici, avant d'appliquer ou
+    // d'enregistrer en tant que scene HA.
     list.innerHTML = this._suggestions
-      .map((s) => {
+      .map((s, i) => {
         const st = this._hass.states[s.entity_id];
         const name = (st && st.attributes && st.attributes.friendly_name) || s.entity_id;
-        const swatch = s.color_temp_kelvin != null ? kelvinToCss(s.color_temp_kelvin) : hsvToCss(s.hue, s.saturation, s.brightness);
-        const detail =
-          s.color_temp_kelvin != null
-            ? `${s.color_temp_kelvin} K`
-            : `teinte ${Math.round(s.hue)}°, sat ${Math.round(s.saturation)}%`;
+        const isColorTemp = s.color_temp_kelvin != null;
+        const swatch = isColorTemp ? kelvinToCss(s.color_temp_kelvin) : hsvToCss(s.hue, s.saturation, 255);
+        const brightnessPct = Math.round((s.brightness / 255) * 100);
+
+        const colorControl = isColorTemp
+          ? `<input type="range" class="scene-kelvin-input" data-index="${i}" min="2000" max="6500" step="50" value="${s.color_temp_kelvin}" style="width:90px;" title="Température (K)" />`
+          : `<input type="color" class="scene-color-input" data-index="${i}" value="${swatch}" style="width:32px;height:32px;padding:0;border:none;border-radius:6px;cursor:pointer;flex:0 0 32px;" title="Couleur" />`;
+
         return `
-          <div class="light-item">
-            <span style="width:16px;height:16px;border-radius:4px;background:${swatch};flex:0 0 16px;"></span>
-            <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(name)}</span>
-            <span style="color:var(--secondary-text-color);">${detail}, lum. ${s.brightness}</span>
+          <div class="light-item" style="flex-wrap:wrap;">
+            ${colorControl}
+            <span style="flex:1;min-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(name)}</span>
+            <input type="range" class="scene-brightness-input" data-index="${i}" min="1" max="255" value="${s.brightness}" style="flex:1 1 100px;min-width:80px;" title="Luminosité" />
+            <span class="scene-brightness-value" style="width:38px;text-align:right;color:var(--secondary-text-color);">${brightnessPct}%</span>
           </div>`;
       })
       .join("");
+
+    list.querySelectorAll(".scene-color-input").forEach((input) => {
+      input.addEventListener("input", (ev) => {
+        const idx = parseInt(ev.target.getAttribute("data-index"), 10);
+        const { hue, saturation } = hexToHueSat(ev.target.value);
+        this._suggestions[idx].hue = hue;
+        this._suggestions[idx].saturation = saturation;
+        this._renderCanvas();
+      });
+    });
+    list.querySelectorAll(".scene-kelvin-input").forEach((input) => {
+      input.addEventListener("input", (ev) => {
+        const idx = parseInt(ev.target.getAttribute("data-index"), 10);
+        this._suggestions[idx].color_temp_kelvin = parseInt(ev.target.value, 10);
+        this._renderCanvas();
+      });
+    });
+    list.querySelectorAll(".scene-brightness-input").forEach((input) => {
+      input.addEventListener("input", (ev) => {
+        const idx = parseInt(ev.target.getAttribute("data-index"), 10);
+        const value = parseInt(ev.target.value, 10);
+        this._suggestions[idx].brightness = value;
+        const valueLabel = input.parentElement.querySelector(".scene-brightness-value");
+        if (valueLabel) valueLabel.textContent = `${Math.round((value / 255) * 100)}%`;
+        this._renderCanvas();
+      });
+    });
 
     if (applyActions) applyActions.style.display = "flex";
   }
@@ -1753,6 +1875,173 @@ class AlexLightStudioPanel extends HTMLElement {
     });
     list.querySelectorAll(".gradient-delete-btn").forEach((btn) => {
       btn.addEventListener("click", () => this._deleteGradientScene(btn.closest(".scene-row").getAttribute("data-name")));
+    });
+  }
+
+  // ===========================================================================
+  // === Generation de scene depuis une image ==================================
+  // ===========================================================================
+
+  _wireSceneImageInputs() {
+    const dropzone = this.shadowRoot.querySelector("#scene-image-dropzone");
+    const fileInput = this.shadowRoot.querySelector("#scene-image-file-input");
+    const canvas = this.shadowRoot.querySelector("#scene-image-canvas");
+    if (!dropzone || !fileInput || !canvas) return;
+
+    dropzone.addEventListener("click", () => fileInput.click());
+    dropzone.addEventListener("dragover", (ev) => {
+      ev.preventDefault();
+      dropzone.classList.add("dragover");
+    });
+    dropzone.addEventListener("dragleave", () => dropzone.classList.remove("dragover"));
+    dropzone.addEventListener("drop", (ev) => {
+      ev.preventDefault();
+      dropzone.classList.remove("dragover");
+      const file = ev.dataTransfer.files && ev.dataTransfer.files[0];
+      if (file) this._loadSceneImageFile(file);
+    });
+    fileInput.addEventListener("change", (ev) => {
+      const file = ev.target.files && ev.target.files[0];
+      if (file) this._loadSceneImageFile(file);
+    });
+
+    canvas.addEventListener("click", (ev) => this._onSceneImageCanvasClick(ev));
+
+    this.shadowRoot.querySelector("#scene-image-clear-points-btn").addEventListener("click", () => {
+      this._sceneImagePoints = [];
+      this._renderSceneImagePoints();
+    });
+    this.shadowRoot.querySelector("#scene-image-change-btn").addEventListener("click", () => {
+      this._sceneImageDataUrl = null;
+      this._sceneImagePoints = [];
+      this.shadowRoot.querySelector("#scene-image-preview-wrap").style.display = "none";
+      dropzone.style.display = "block";
+      fileInput.value = "";
+    });
+
+    // Retour sur cette vue avec une image deja chargee precedemment (la
+    // coquille est reconstruite a chaque bascule de vue, mais pas l'etat) --
+    // la redessine sans perdre les points deja places.
+    if (this._sceneImageDataUrl) {
+      this._loadSceneImageFromDataUrl(this._sceneImageDataUrl, true);
+    }
+  }
+
+  _loadSceneImageFile(file) {
+    if (!file.type || !file.type.startsWith("image/")) {
+      alert("Le fichier déposé n'est pas une image.");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => this._loadSceneImageFromDataUrl(reader.result);
+    reader.readAsDataURL(file);
+  }
+
+  // keepPoints : vrai uniquement lors d'un retour sur la vue avec une image
+  // deja chargee -- une VRAIE nouvelle image (glisser-depose/choix de
+  // fichier/"Changer d'image") repart toujours d'une palette vide, les
+  // points precedents n'ayant plus de sens sur une image differente.
+  _loadSceneImageFromDataUrl(dataUrl, keepPoints) {
+    const img = new Image();
+    img.onload = () => {
+      this._sceneImageDataUrl = dataUrl;
+      if (!keepPoints) this._sceneImagePoints = [];
+
+      const canvas = this.shadowRoot.querySelector("#scene-image-canvas");
+      if (!canvas) return;
+      // Cap la resolution interne du canvas -- les teintes restent
+      // representatives de l'image sans avoir besoin de sa pleine
+      // resolution photo, qui alourdirait inutilement getImageData.
+      const MAX_DIM = 800;
+      const scale = Math.min(1, MAX_DIM / Math.max(img.width, img.height));
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+      this.shadowRoot.querySelector("#scene-image-dropzone").style.display = "none";
+      this.shadowRoot.querySelector("#scene-image-preview-wrap").style.display = "block";
+      this._renderSceneImagePoints();
+    };
+    img.onerror = () => alert("Impossible de charger cette image.");
+    img.src = dataUrl;
+  }
+
+  _onSceneImageCanvasClick(ev) {
+    if (this._sceneImagePoints.length >= 8) {
+      alert("Maximum 8 points de couleur -- retire-en un avant d'en ajouter un autre.");
+      return;
+    }
+    const canvas = this.shadowRoot.querySelector("#scene-image-canvas");
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+
+    // Le canvas peut etre affiche plus petit/grand que sa resolution
+    // interne relle (width/height de l'element canvas) via le CSS --
+    // convertit les coordonnees d'affichage (clientX/Y) vers les pixels
+    // REELS du canvas avant d'echantillonner.
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const px = Math.max(0, Math.min(canvas.width - 1, Math.round((ev.clientX - rect.left) * scaleX)));
+    const py = Math.max(0, Math.min(canvas.height - 1, Math.round((ev.clientY - rect.top) * scaleY)));
+
+    const ctx = canvas.getContext("2d");
+    const pixel = ctx.getImageData(px, py, 1, 1).data;
+    const { hue, saturation } = rgbToHueSat(pixel[0], pixel[1], pixel[2]);
+
+    this._sceneImagePoints.push({
+      x: px / canvas.width, // fraction 0-1 -- le marqueur reste au bon endroit meme si le canvas est redimensionne
+      y: py / canvas.height,
+      hue,
+      saturation,
+    });
+    this._renderSceneImagePoints();
+  }
+
+  _removeSceneImagePoint(index) {
+    this._sceneImagePoints.splice(index, 1);
+    this._renderSceneImagePoints();
+  }
+
+  _renderSceneImagePoints() {
+    const wrap = this.shadowRoot.querySelector("#scene-image-canvas-wrap");
+    if (!wrap) return;
+    wrap.querySelectorAll(".scene-image-point-marker").forEach((el) => el.remove());
+    this._sceneImagePoints.forEach((p, i) => {
+      const marker = document.createElement("div");
+      marker.className = "scene-image-point-marker";
+      marker.style.left = `${p.x * 100}%`;
+      marker.style.top = `${p.y * 100}%`;
+      marker.style.background = hsvToCss(p.hue, p.saturation, 220);
+      marker.textContent = String(i + 1);
+      marker.title = "Cliquer pour retirer ce point";
+      marker.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        this._removeSceneImagePoint(i);
+      });
+      wrap.appendChild(marker);
+    });
+
+    const list = this.shadowRoot.querySelector("#scene-image-palette-list");
+    if (!list) return;
+    if (!this._sceneImagePoints.length) {
+      list.innerHTML = `<div class="empty">Aucun point placé pour l'instant.</div>`;
+      return;
+    }
+    list.innerHTML = this._sceneImagePoints
+      .map((p, i) => {
+        const css = hsvToCss(p.hue, p.saturation, 220);
+        return `
+          <div class="scene-image-palette-row">
+            <span style="width:20px;height:20px;border-radius:5px;background:${css};flex:0 0 20px;"></span>
+            <span style="flex:1;">Point ${i + 1} — teinte ${Math.round(p.hue)}°, saturation ${Math.round(p.saturation)}%</span>
+            <span class="scene-image-del-point" data-index="${i}" style="cursor:pointer;opacity:.7;">✕</span>
+          </div>`;
+      })
+      .join("");
+    list.querySelectorAll(".scene-image-del-point").forEach((el) => {
+      el.addEventListener("click", () => this._removeSceneImagePoint(parseInt(el.getAttribute("data-index"), 10)));
     });
   }
 }

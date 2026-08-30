@@ -165,6 +165,9 @@ COMPUTE_SCENE_SCHEMA = {
     vol.Optional("contrast"): vol.All(vol.Coerce(float), vol.Range(min=0, max=1)),
     vol.Optional("white_temperature"): vol.Coerce(float),
     vol.Optional("generation_style", default="normal"): vol.In(list(harmony.GENERATION_STYLES)),
+    # Palette extraite d'une image par l'utilisateur (points places a la
+    # main) -- liste de [teinte, saturation], prioritaire sur mood/base_hue.
+    vol.Optional("image_palette"): [vol.All([vol.Coerce(float)], vol.Length(min=2, max=2))],
 }
 
 SUGGESTION_SCHEMA = {
@@ -424,6 +427,9 @@ async def websocket_compute_scene(hass: HomeAssistant, connection, msg) -> None:
         for z in msg.get("zones", [])
     ]
 
+    image_palette_raw = msg.get("image_palette")
+    image_palette = [(p[0], p[1]) for p in image_palette_raw] if image_palette_raw else None
+
     try:
         suggestions = harmony.compute_scene(
             light_inputs,
@@ -435,6 +441,7 @@ async def websocket_compute_scene(hass: HomeAssistant, connection, msg) -> None:
             contrast=msg.get("contrast"),
             white_temperature=msg.get("white_temperature"),
             generation_style=msg.get("generation_style", "normal"),
+            image_palette=image_palette,
             zones=zone_inputs,
             rng=random.Random(),
         )

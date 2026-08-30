@@ -313,6 +313,7 @@ def compute_scene(
     role_multiplier: dict[str, float] | None = None,
     zones: list[ZoneInput] | None = None,
     generation_style: str = "normal",
+    image_palette: list[tuple[float, float]] | None = None,
     rng: random.Random | None = None,
 ) -> list[LightSuggestion]:
     """Calcule une proposition pour chaque lumiere, en combinant :
@@ -322,11 +323,28 @@ def compute_scene(
          melangee en espace perceptuel OKLCH.
       3. Un role PONDERE (pas rigide) qui determine saturation/luminosite.
       4. La puissance relative de la lumiere (section 9.1).
+
+    `image_palette` (optionnel) : liste de (teinte, saturation) extraites
+    par l'utilisateur en pointant des couleurs sur une image -- utilisee
+    DIRECTEMENT comme degrade de base (hue_slots), sans passer par un
+    schema chromatique genere (analogue/complementaire/triadique) : la
+    palette choisie EST deja l'intention, pas un point de depart a
+    reinterpreter. Prioritaire sur mood/base_hue si fournie.
     """
     rng = rng or random.Random()
     zones = zones or []
+    hue_slots: list[float] | None = None
 
-    if mood is not None:
+    if image_palette:
+        if len(image_palette) < 1:
+            raise ValueError("La palette extraite de l'image est vide")
+        hue_slots = [h for h, _ in image_palette]
+        resolved_sat = sum(s for _, s in image_palette) / len(image_palette)
+        resolved_intensity = global_intensity if global_intensity is not None else 1.0
+        resolved_contrast = contrast if contrast is not None else 0.6
+        resolved_white_temp = white_temperature if white_temperature is not None else 2700.0
+        resolved_role_mult = role_multiplier or {}
+    elif mood is not None:
         preset = MOOD_PRESETS.get(mood)
         if preset is None:
             raise ValueError(f"Ambiance inconnue: {mood}")
@@ -360,8 +378,9 @@ def compute_scene(
     resolved_sat *= style["saturation_mult"]
     style_intensity_mult = style["intensity_mult"]
 
-    direction_sign = rng.choice((1, -1))
-    hue_slots = _hue_scheme(resolved_hue, scheme, direction_sign)
+    if hue_slots is None:
+        direction_sign = rng.choice((1, -1))
+        hue_slots = _hue_scheme(resolved_hue, scheme, direction_sign)
 
     heights = [light.height for light in lights]
     min_height, max_height = (min(heights), max(heights)) if heights else (0.0, 0.0)

@@ -73,6 +73,21 @@ deux bibliothèques distinctes :
 - `alex_light_studio.gradient_scenes` — scènes de dégradé (points d'ancrage
   position/couleur, indépendants du nombre de segments réel du bandeau).
 
+## Création de scènes
+
+- **Aperçu modifiable** — après génération, chaque lumière garde son propre
+  sélecteur de couleur (ou curseur de température pour les lumières
+  blanches) et son curseur de luminosité, directement dans la liste
+  d'aperçu. La proposition automatique est un point de départ, pas un
+  résultat figé.
+- **Génération depuis une image** — troisième mode de génération, à côté de
+  « Ambiance prédéfinie » et « Teinte libre » : glisse une image (ou
+  clique pour en choisir une), puis place 2 à 8 points directement dessus
+  pour échantillonner les couleurs à ces endroits précis. La palette
+  obtenue sert de dégradé de base pour la pièce, exactement comme le
+  ferait une ambiance prédéfinie — compatible avec le style de génération
+  (Doux/Normal/Dynamique/Explosif) et les zones à influence chromatique.
+
 ## Cartes Lovelace
 
 ### `alex-gradient-card`
