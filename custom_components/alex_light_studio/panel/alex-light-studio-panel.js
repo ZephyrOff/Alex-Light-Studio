@@ -341,7 +341,7 @@ class AlexLightStudioPanel extends HTMLElement {
         }
         * { box-sizing: border-box; }
         .header {
-          display: flex; align-items: center; gap: 12px; padding: 16px 24px;
+          display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 16px 24px;
           background: var(--app-header-background-color, var(--primary-color, #03a9f4));
         }
         .header button.menu-btn {
@@ -421,6 +421,34 @@ class AlexLightStudioPanel extends HTMLElement {
           overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
         }
         .scene-row .btn { padding: 6px 10px; font-size: 12px; }
+
+        /* --- Mobile (telephone) -------------------------------------------
+         * La barre laterale a largeur fixe et les lignes de formulaire
+         * cote-a-cote fonctionnent en desktop mais rendent le panel
+         * inutilisable sur un ecran etroit : la barre laterale a elle seule
+         * peut occuper la quasi-totalite de la largeur disponible. Sous ce
+         * seuil, on empile plutot que d'aligner cote a cote. */
+        @media (max-width: 780px) {
+          :host { overflow-y: auto; }
+          .header { padding: 12px 16px; }
+          .header h1 { font-size: 16px; }
+          .layout { flex-direction: column; height: auto; min-height: calc(100% - 64px); }
+          .sidebar {
+            width: 100%; flex: none; max-height: 200px;
+            border-right: none; border-bottom: 1px solid var(--divider-color, #333);
+          }
+          .content { padding: 12px; }
+          .row { flex-direction: column; align-items: stretch; }
+          .row label { flex: none; margin-bottom: 4px; }
+          .row > *:not(label) { min-width: 0; }
+          .btn, input[type="text"], input[type="number"], select {
+            padding: 11px 14px; /* cibles tactiles plus confortables (~44px de haut avec le texte) */
+          }
+          .scene-row { flex-wrap: wrap; }
+          .scene-name { flex: 1 1 100%; order: -1; margin-bottom: 2px; }
+          .light-item { flex-wrap: wrap; }
+          .stop-cell input[type="color"] { width: 40px; height: 40px; }
+        }
       </style>
 
       <div class="header">
@@ -1008,6 +1036,19 @@ class AlexLightStudioPanel extends HTMLElement {
     const svg = this.shadowRoot.querySelector("#plan");
     if (!svg) return;
 
+    // Rayons des poignees (points de mur/zones/lumieres) adaptes a l'echelle
+    // REELLE de rendu du plan, pas seulement a la largeur de la fenetre --
+    // le viewBox reste fixe (${VIEWBOX_W}x${VIEWBOX_H}) mais le plan peut
+    // s'afficher bien plus compresse sur un telephone qu'en desktop. Sans
+    // ca, un rayon de 7-10 unites devient quelques pixels a peine des que
+    // le plan est compresse a moins de la moitie de sa largeur de
+    // conception, rendant les poignees quasi impossibles a toucher.
+    const svgRect = svg.getBoundingClientRect();
+    const renderScale = svgRect.width > 0 ? svgRect.width / VIEWBOX_W : 1;
+    const wallPointR = Math.max(7, 9 / renderScale);
+    const zoneCenterR = Math.max(8, 10 / renderScale);
+    const lightMarkerR = Math.max(10, 12 / renderScale);
+
     const placementModeCard = this.shadowRoot.querySelector("#placement-mode-card");
     const lightsCard = this.shadowRoot.querySelector("#lights-card");
     const zonesCard = this.shadowRoot.querySelector("#zones-card");
@@ -1033,7 +1074,7 @@ class AlexLightStudioPanel extends HTMLElement {
     const cornerDots = this._points
       .map(
         (p, i) =>
-          `<circle class="wall-point" data-point-index="${i}" cx="${p.x}" cy="${p.y}" r="7"
+          `<circle class="wall-point" data-point-index="${i}" cx="${p.x}" cy="${p.y}" r="${wallPointR}"
              fill="${i === 0 ? "#f4a935" : "#03a9f4"}" stroke="white" stroke-width="1.5"
              style="cursor:grab;" />`
       )
@@ -1049,7 +1090,7 @@ class AlexLightStudioPanel extends HTMLElement {
           <g class="zone-marker" data-zone-index="${i}">
             <circle cx="${z.x}" cy="${z.y}" r="${z.influence_radius}" fill="${css}" fill-opacity="0.08"
                     stroke="${css}" stroke-opacity="0.5" stroke-width="1.5" stroke-dasharray="6,4" style="pointer-events:none;" />
-            <circle class="zone-center" data-zone-index="${i}" cx="${z.x}" cy="${z.y}" r="8" fill="${css}"
+            <circle class="zone-center" data-zone-index="${i}" cx="${z.x}" cy="${z.y}" r="${zoneCenterR}" fill="${css}"
                     stroke="white" stroke-width="1.5" style="cursor:grab;" />
             <text x="${z.x}" y="${z.y - 14}" font-size="11" text-anchor="middle" fill="white" style="pointer-events:none;">${escapeHtml(z.name)}</text>
           </g>`;
@@ -1075,7 +1116,7 @@ class AlexLightStudioPanel extends HTMLElement {
         }
         return `
           <g class="light-marker" data-light-index="${i}" style="cursor:grab;">
-            <circle cx="${l.x}" cy="${l.y}" r="10" fill="${color}" stroke="white" stroke-width="1.5" opacity="0.95" />
+            <circle cx="${l.x}" cy="${l.y}" r="${lightMarkerR}" fill="${color}" stroke="white" stroke-width="1.5" opacity="0.95" />
             ${!sug ? `<text x="${l.x}" y="${l.y + 3}" font-size="9" text-anchor="middle" fill="white" style="pointer-events:none;">${MOUNT_TYPE_ICONS[l.mount_type] || ""}</text>` : ""}
           </g>`;
       })
