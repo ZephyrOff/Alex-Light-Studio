@@ -16,6 +16,8 @@ la logique se teste et se relit isolement, meme principe que gradient.py.
 """
 from __future__ import annotations
 
+import math
+
 
 def hsv_to_hex(hue: float, saturation: float, value: float) -> str:
     """Teinte (0-360), saturation (0-1), valeur (0-1) -> couleur hex.
@@ -48,6 +50,40 @@ def hsv_to_hex(hue: float, saturation: float, value: float) -> str:
     else:
         r, g, b = c, 0.0, x
     return "#" + "".join(f"{max(0, min(255, round((v + m) * 255))):02x}" for v in (r, g, b))
+
+
+def kelvin_to_hex(kelvin: float, value: float = 1.0) -> str:
+    """Approximation RGB d'une temperature de couleur (algorithme de Tanner
+    Helland, 1000-40000K) -- suffisant pour un rendu visuel sur bandeau LED,
+    pas une reproduction spectrale exacte. `value` (0-1) joue le meme role
+    que dans hsv_to_hex : la luminosite de la zone, cuite dans la couleur
+    finale plutot que comptee sur le champ brightness partage du payload."""
+    temp = max(1000.0, min(40000.0, kelvin)) / 100.0
+
+    if temp <= 66:
+        red = 255.0
+    else:
+        red = 329.698727446 * ((temp - 60) ** -0.1332047592)
+
+    if temp <= 66:
+        green = 99.4708025861 * math.log(temp) - 161.1195681661
+    else:
+        green = 288.1221695283 * ((temp - 60) ** -0.0755148492)
+
+    if temp >= 66:
+        blue = 255.0
+    elif temp <= 19:
+        blue = 0.0
+    else:
+        blue = 138.5177312231 * math.log(temp - 10) - 305.0447927307
+
+    value = max(0.0, min(1.0, value))
+    rgb = (
+        max(0.0, min(255.0, red)) * value,
+        max(0.0, min(255.0, green)) * value,
+        max(0.0, min(255.0, blue)) * value,
+    )
+    return "#" + "".join(f"{max(0, min(255, round(c))):02x}" for c in rgb)
 
 
 def compute_zone_colors(zones: list[dict], segment_count: int, idle_color: str = "#000000") -> list[str]:

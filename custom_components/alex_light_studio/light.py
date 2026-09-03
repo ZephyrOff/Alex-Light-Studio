@@ -15,22 +15,30 @@ from __future__ import annotations
 
 import logging
 
-from homeassistant.components.light import ATTR_BRIGHTNESS, ATTR_HS_COLOR, ColorMode, LightEntity
+from homeassistant.components.light import (
+    ATTR_BRIGHTNESS,
+    ATTR_COLOR_TEMP_KELVIN,
+    ATTR_HS_COLOR,
+    ColorMode,
+    LightEntity,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import DOMAIN
-from .zones import hsv_to_hex
+from .zones import hsv_to_hex, kelvin_to_hex
 
 _LOGGER = logging.getLogger(__name__)
 
 # Etat par defaut d'une zone jamais encore allumee (pas de RestoreEntity a
 # lire) -- ambre chaud plutot que blanc pur, plus flatteur comme premiere
-# impression sur un bandeau de nuance chaude.
+# impression sur un bandeau de nuance chaude. Mode couleur par defaut : HS
+# (coherent avec cette teinte de depart).
 _DEFAULT_HS_COLOR = (30.0, 80.0)
 _DEFAULT_BRIGHTNESS = 200
+_DEFAULT_COLOR_TEMP_KELVIN = 3000
 
 
 async def async_setup_entry(
@@ -52,14 +60,17 @@ async def async_setup_entry(
 
 class AlexLightStudioZoneLight(RestoreEntity, LightEntity):
     """Une zone = un groupe d'un ou plusieurs segments d'un bandeau,
-    pilotable comme une lumiere HS classique. La couleur/luminosite
-    controle directement ce qui est envoye pour les segments de cette zone
-    au prochain recalcul du bandeau parent -- pas de materiel propre, tout
-    l'etat vit dans cette entite (d'ou RestoreEntity)."""
+    pilotable comme une lumiere HS + temperature de couleur classique. La
+    couleur/luminosite controle directement ce qui est envoye pour les
+    segments de cette zone au prochain recalcul du bandeau parent -- pas de
+    materiel propre, tout l'etat vit dans cette entite (d'ou RestoreEntity).
+
+    Les deux modes (HS et temperature) sont proposes ; le mode COURANT
+    (`_attr_color_mode`) bascule sur celui utilise en dernier -- HA n'admet
+    qu'un seul mode actif a la fois, meme si plusieurs sont "supportes"."""
 
     _attr_should_poll = False
-    _attr_color_mode = ColorMode.HS
-    _attr_supported_color_modes = {ColorMode.HS}
+    _attr_supported_color_modes = {ColorMode.HS, ColorMode.COLOR_TEMP}
 
     def __init__(self, hass: HomeAssistant, entry_id: str, zone_id: str) -> None:
         self.hass = hass
@@ -76,7 +87,9 @@ class AlexLightStudioZoneLight(RestoreEntity, LightEntity):
         zone_slug = zone_id.replace("-", "")
         self.entity_id = f"light.alex_light_studio_zone_{zone_slug}"
         self._attr_is_on = False
+        self._attr_color_mode = ColorMode.HS
         self._attr_hs_color = _DEFAULT_HS_COLOR
+        self._attr_color_temp_kelvin = _DEFAULT_COLOR_TEMP_KELVIN
         self._attr_brightness = _DEFAULT_BRIGHTNESS
 
     async def async_added_to_hass(self) -> None:
@@ -89,6 +102,12 @@ class AlexLightStudioZoneLight(RestoreEntity, LightEntity):
             hs = last_state.attributes.get("hs_color")
             if hs is not None:
                 self._attr_hs_color = tuple(hs)
+            color_temp = last_state.attributes.get("color_temp_kelvin")
+            if color_temp is not None:
+                self._attr_color_temp_kelvin = color_temp
+            restored_mode = last_state.attributes.get("color_mode")
+            if restored_mode in (ColorMode.HS, ColorMode.COLOR_TEMP):
+                self._attr_color_mode = restored_mode
             brightness = last_state.attributes.get("brightness")
             if brightness is not None:
                 self._attr_brightness = brightness
@@ -105,16 +124,23 @@ class AlexLightStudioZoneLight(RestoreEntity, LightEntity):
     def rgb_color_hex(self) -> str:
         """Couleur hex actuelle de cette zone, luminosite comprise --
         consommee par le recalcul du bandeau parent (voir
-        __init__._async_recompute_strip). #000000 si eteinte."""
+        __init__._async_recompute_strip). #000000 si eteinte. Suit le mode
+        courant : conversion HS ou temperature selon le dernier reglage."""
         if not self._attr_is_on:
             return "#000000"
-        hue, sat = self._attr_hs_color
         value = (self._attr_brightness or 255) / 255
+        if self._attr_color_mode == ColorMode.COLOR_TEMP:
+            return kelvin_to_hex(self._attr_color_temp_kelvin or _DEFAULT_COLOR_TEMP_KELVIN, value)
+        hue, sat = self._attr_hs_color
         return hsv_to_hex(hue, sat / 100, value)
 
     async def async_turn_on(self, **kwargs) -> None:
         if ATTR_HS_COLOR in kwargs:
             self._attr_hs_color = kwargs[ATTR_HS_COLOR]
+            self._attr_color_mode = ColorMode.HS
+        elif ATTR_COLOR_TEMP_KELVIN in kwargs:
+            self._attr_color_temp_kelvin = kwargs[ATTR_COLOR_TEMP_KELVIN]
+            self._attr_color_mode = ColorMode.COLOR_TEMP
         if ATTR_BRIGHTNESS in kwargs:
             self._attr_brightness = kwargs[ATTR_BRIGHTNESS]
         self._attr_is_on = True
