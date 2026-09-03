@@ -189,6 +189,11 @@ function gradientDefaultLengthEntity(entityId) {
 
 const MOUNT_TYPE_ICONS = { ceiling: "\u2B24", wall: "\u25A0", desk: "\u25B2" }; // cercle / carre / triangle plein, distinction visuelle rapide sans dependre d'icones externes
 
+// Cycle de couleurs pour le petit point "deja utilise par une autre zone"
+// dans la grille de segments (vue LightZone) -- purement indicatif, sans
+// rapport avec la couleur reelle de la zone (qui vient de son entite light).
+const LIGHTZONE_PALETTE = ["#03a9f4", "#f4a935", "#66bb6a", "#ab47bc", "#ef5350", "#26c6da"];
+
 class AlexLightStudioPanel extends HTMLElement {
   constructor() {
     super();
@@ -260,6 +265,24 @@ class AlexLightStudioPanel extends HTMLElement {
     this._gradientFriendlyNameOverride = "";
     this._gradientDeviceType = "hue";
     this._gradientLastScenesSig = null;
+
+    // Vue LightZone : zones de segments d'un bandeau, chacune sa propre
+    // lumiere virtuelle activable independamment (voir light.py cote
+    // integration). Le registre de bandeaux (_lightzoneStrips) est PARTAGE
+    // avec la vue Gradient cote stockage (meme websocket get_strips), mais
+    // mis en cache localement ici pour l'affichage.
+    this._lightzoneBuilt = false;
+    this._lightzoneStrips = {}; // {strip_id: {...}}, depuis get_strips
+    this._lightzoneZones = {}; // {zone_id: {...}}, depuis get_light_zones
+    this._lightzoneSelectedStripId = "";
+    this._lightzoneShowNewStripForm = false;
+    // Brouillon du formulaire "nouveau bandeau" (avant enregistrement).
+    this._lightzoneNewStrip = { entity: "", device_type: "hue", friendly_name: "", segments: 5, length_entity: "", name: "" };
+    // Segments actuellement selectionnes pour la PROCHAINE zone a creer
+    // (pas encore enregistree) -- se vide apres creation.
+    this._lightzoneSelectedSegments = [];
+    this._lightzoneNewZoneName = "";
+    this._lightzoneLastZonesSig = null;
   }
 
   set hass(hass) {
@@ -271,6 +294,9 @@ class AlexLightStudioPanel extends HTMLElement {
     }
     if (this._gradientBuilt) {
       this._renderGradientSceneList();
+    }
+    if (this._lightzoneBuilt) {
+      this._renderLightZoneList();
     }
   }
 
@@ -457,6 +483,31 @@ class AlexLightStudioPanel extends HTMLElement {
         }
         .scene-row .btn { padding: 6px 10px; font-size: 12px; }
 
+        /* --- Vue LightZone ---------------------------------------------- */
+        .segment-grid { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+        .segment-cell {
+          width: 42px; height: 42px; border-radius: 8px; border: 1px solid var(--divider-color, #444);
+          background: var(--card-background-color, #1e1e1e); color: var(--primary-text-color, #fff);
+          display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600;
+          cursor: pointer; position: relative; user-select: none;
+        }
+        .segment-cell.selected { border-color: var(--primary-color, #03a9f4); background: rgba(var(--rgb-primary-color,3,169,244),.25); }
+        .segment-cell .used-dot {
+          position: absolute; top: 3px; right: 3px; width: 8px; height: 8px; border-radius: 50%;
+        }
+        .zone-list { display: flex; flex-direction: column; gap: 10px; }
+        .zone-row {
+          display: flex; align-items: center; gap: 12px;
+          border: 1px solid var(--divider-color, #444); border-radius: 12px; padding: 10px 12px;
+        }
+        .zone-swatch { width: 28px; height: 28px; border-radius: 50%; flex: 0 0 auto; border: 2px solid var(--divider-color, #444); }
+        .zone-info { flex: 1; min-width: 0; }
+        .zone-name { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .zone-segments { font-size: 11px; color: var(--secondary-text-color); }
+        .zone-row .btn { padding: 6px 10px; font-size: 12px; }
+        .strip-picker-row { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+        .strip-picker-row select { flex: 1; min-width: 160px; }
+
         /* --- Mobile (telephone) -------------------------------------------
          * La barre laterale a largeur fixe et les lignes de formulaire
          * cote-a-cote fonctionnent en desktop mais rendent le panel
@@ -483,6 +534,9 @@ class AlexLightStudioPanel extends HTMLElement {
           .scene-name { flex: 1 1 100%; order: -1; margin-bottom: 2px; }
           .light-item { flex-wrap: wrap; }
           .stop-cell input[type="color"] { width: 40px; height: 40px; }
+          .segment-cell { width: 36px; height: 36px; }
+          .zone-row { flex-wrap: wrap; }
+          .zone-info { flex: 1 1 100%; order: -1; margin-bottom: 2px; }
         }
 
         /* --- Generation de scene depuis une image ---------------------- */
@@ -514,6 +568,7 @@ class AlexLightStudioPanel extends HTMLElement {
         <h1>Alex Light Studio</h1>
         <div class="actions" style="margin:0 12px;">
           <button class="btn btn-outline" id="nav-gradient-btn">Gradient</button>
+          <button class="btn btn-outline" id="nav-lightzone-btn">Zones</button>
           <button class="btn btn-outline" id="nav-room-btn">Pièces</button>
           <button class="btn btn-outline" id="nav-scene-btn">Scènes</button>
         </div>
@@ -761,6 +816,7 @@ class AlexLightStudioPanel extends HTMLElement {
         </div>
 
         <div class="content" id="gradient-content" style="display:none;"></div>
+        <div class="content" id="lightzone-content" style="display:none;"></div>
       </div>
     `;
 
@@ -768,6 +824,7 @@ class AlexLightStudioPanel extends HTMLElement {
       this.dispatchEvent(new Event("hass-toggle-menu", { bubbles: true, composed: true }));
     });
     this.shadowRoot.querySelector("#nav-gradient-btn").addEventListener("click", () => this._setActiveView("gradient"));
+    this.shadowRoot.querySelector("#nav-lightzone-btn").addEventListener("click", () => this._setActiveView("lightzone"));
     this.shadowRoot.querySelector("#nav-room-btn").addEventListener("click", () => this._setActiveView("room"));
     this.shadowRoot.querySelector("#nav-scene-btn").addEventListener("click", () => this._setActiveView("scene"));
     this._setActiveView(this._activeView);
@@ -915,12 +972,14 @@ class AlexLightStudioPanel extends HTMLElement {
     const sidebar = this.shadowRoot.querySelector(".sidebar");
     const roomSceneContent = this.shadowRoot.querySelector("#room-scene-content");
     const gradientContent = this.shadowRoot.querySelector("#gradient-content");
+    const lightzoneContent = this.shadowRoot.querySelector("#lightzone-content");
     const viewRoom = this.shadowRoot.querySelector("#view-room");
     const viewScene = this.shadowRoot.querySelector("#view-scene");
     const newRoomBtn = this.shadowRoot.querySelector("#new-room-btn");
     const roomNameRow = this.shadowRoot.querySelector("#room-name-row");
     const outlineActions = this.shadowRoot.querySelector("#outline-actions");
     const navGradientBtn = this.shadowRoot.querySelector("#nav-gradient-btn");
+    const navLightzoneBtn = this.shadowRoot.querySelector("#nav-lightzone-btn");
     const navRoomBtn = this.shadowRoot.querySelector("#nav-room-btn");
     const navSceneBtn = this.shadowRoot.querySelector("#nav-scene-btn");
     const sidebarHint = this.shadowRoot.querySelector("#sidebar-hint");
@@ -929,12 +988,14 @@ class AlexLightStudioPanel extends HTMLElement {
     if (sidebar) sidebar.style.display = isRoomOrScene ? "block" : "none";
     if (roomSceneContent) roomSceneContent.style.display = isRoomOrScene ? "flex" : "none";
     if (gradientContent) gradientContent.style.display = view === "gradient" ? "flex" : "none";
+    if (lightzoneContent) lightzoneContent.style.display = view === "lightzone" ? "flex" : "none";
     if (viewRoom) viewRoom.style.display = view === "room" ? "block" : "none";
     if (viewScene) viewScene.style.display = view === "scene" ? "block" : "none";
     if (newRoomBtn) newRoomBtn.style.display = view === "room" ? "inline-block" : "none";
     if (roomNameRow) roomNameRow.style.display = view === "room" ? "flex" : "none";
     if (outlineActions) outlineActions.style.display = view === "room" ? "flex" : "none";
     if (navGradientBtn) navGradientBtn.style.background = view === "gradient" ? "var(--primary-color, #03a9f4)" : "transparent";
+    if (navLightzoneBtn) navLightzoneBtn.style.background = view === "lightzone" ? "var(--primary-color, #03a9f4)" : "transparent";
     if (navRoomBtn) navRoomBtn.style.background = view === "room" ? "var(--primary-color, #03a9f4)" : "transparent";
     if (navSceneBtn) navSceneBtn.style.background = view === "scene" ? "var(--primary-color, #03a9f4)" : "transparent";
     if (sidebarHint) {
@@ -948,6 +1009,12 @@ class AlexLightStudioPanel extends HTMLElement {
         this._gradientBuilt = true;
       }
       this._renderGradientSceneList();
+    } else if (view === "lightzone") {
+      if (!this._lightzoneBuilt) {
+        this._renderLightZoneShell();
+        this._lightzoneBuilt = true;
+      }
+      this._loadLightZoneData();
     } else {
       this._renderCanvas();
     }
@@ -1894,6 +1961,418 @@ class AlexLightStudioPanel extends HTMLElement {
     list.querySelectorAll(".gradient-delete-btn").forEach((btn) => {
       btn.addEventListener("click", () => this._deleteGradientScene(btn.closest(".scene-row").getAttribute("data-name")));
     });
+  }
+
+  // ===========================================================================
+  // === Vue LightZone ==========================================================
+  // Zones de segments d'un bandeau (registre de bandeaux PARTAGE avec la vue
+  // Gradient, cote stockage) : chaque zone = un groupe d'un ou plusieurs
+  // segments, pilotable independamment via sa propre entite light.* (voir
+  // light.py). Construite une seule fois comme la vue Gradient (coquille
+  // figee, seules les parties dependant de hass/du stockage se rafraichissent).
+  // ===========================================================================
+
+  _renderLightZoneShell() {
+    const el = this.shadowRoot.querySelector("#lightzone-content");
+    if (!el) return;
+
+    el.innerHTML = `
+      <div class="card" id="lightzone-strip-card">
+        <h2>Bandeau</h2>
+        <p class="hint">
+          Le registre de bandeaux est partagé avec la vue Gradient : un
+          bandeau déclaré ici apparaît aussi là-bas, et inversement.
+        </p>
+        <div class="strip-picker-row">
+          <select id="lightzone-strip-select"></select>
+          <button class="btn btn-outline" id="lightzone-new-strip-btn">+ Nouveau bandeau</button>
+          <button class="btn btn-outline" id="lightzone-delete-strip-btn">Supprimer ce bandeau</button>
+        </div>
+        <div class="hint error" id="lightzone-strip-error" style="display:none;"></div>
+
+        <div id="lightzone-new-strip-form" style="display:none;">
+          <div class="row">
+            <label>Lumière</label>
+            <select id="lightzone-strip-entity-select"></select>
+          </div>
+          <div class="row">
+            <label>Type d'appareil</label>
+            <select id="lightzone-strip-device-type-select">
+              <option value="hue">Philips Hue Gradient</option>
+              <option value="aqara">Aqara LED Strip T1</option>
+            </select>
+          </div>
+          <div class="row">
+            <label>Nom</label>
+            <input type="text" id="lightzone-strip-name-input" placeholder="ex. Placard entrée" />
+          </div>
+          <div class="row">
+            <label>Nom convivial Z2M</label>
+            <input type="text" id="lightzone-strip-friendly-name-input" placeholder="vide = déduit de l'entité" />
+          </div>
+          <div class="row">
+            <label>Segments (repli)</label>
+            <input type="number" id="lightzone-strip-segments-input" min="2" max="50" value="5" />
+          </div>
+          <div class="actions">
+            <button class="btn btn-primary" id="lightzone-save-strip-btn">Enregistrer le bandeau</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" id="lightzone-segments-card" style="display:none;">
+        <h2>Segments</h2>
+        <p class="hint">
+          Clique sur les segments à regrouper dans une nouvelle zone. Un
+          point coloré indique qu'un segment appartient déjà à une autre
+          zone (chevauchement autorisé — la dernière zone appliquée l'emporte).
+        </p>
+        <div class="segment-grid" id="lightzone-segment-grid"></div>
+        <div class="row">
+          <label>Nom de la zone</label>
+          <input type="text" id="lightzone-zone-name-input" placeholder="ex. Porte 1" />
+        </div>
+        <div class="actions">
+          <button class="btn btn-outline" id="lightzone-clear-selection-btn">Réinitialiser la sélection</button>
+          <button class="btn btn-primary" id="lightzone-create-zone-btn">Créer la zone</button>
+        </div>
+      </div>
+
+      <div class="card" id="lightzone-list-card" style="display:none;">
+        <h2>Zones de ce bandeau</h2>
+        <div class="zone-list" id="lightzone-zone-list"></div>
+      </div>
+    `;
+
+    this._populateLightZoneEntitySelect();
+
+    this.shadowRoot.querySelector("#lightzone-strip-select").addEventListener("change", (ev) => {
+      this._lightzoneSelectedStripId = ev.target.value;
+      this._lightzoneSelectedSegments = [];
+      this._lightzoneLastZonesSig = null;
+      this._renderLightZoneStripDependent();
+    });
+    this.shadowRoot.querySelector("#lightzone-new-strip-btn").addEventListener("click", () => {
+      this._lightzoneShowNewStripForm = !this._lightzoneShowNewStripForm;
+      this.shadowRoot.querySelector("#lightzone-new-strip-form").style.display =
+        this._lightzoneShowNewStripForm ? "block" : "none";
+    });
+    this.shadowRoot.querySelector("#lightzone-delete-strip-btn").addEventListener("click", () => this._deleteLightZoneStrip());
+
+    this.shadowRoot.querySelector("#lightzone-strip-entity-select").addEventListener("change", (ev) => {
+      this._lightzoneNewStrip.entity = ev.target.value;
+    });
+    this.shadowRoot.querySelector("#lightzone-strip-device-type-select").addEventListener("change", (ev) => {
+      this._lightzoneNewStrip.device_type = ev.target.value;
+    });
+    this.shadowRoot.querySelector("#lightzone-strip-name-input").addEventListener("input", (ev) => {
+      this._lightzoneNewStrip.name = ev.target.value;
+    });
+    this.shadowRoot.querySelector("#lightzone-strip-friendly-name-input").addEventListener("input", (ev) => {
+      this._lightzoneNewStrip.friendly_name = ev.target.value;
+    });
+    this.shadowRoot.querySelector("#lightzone-strip-segments-input").addEventListener("input", (ev) => {
+      this._lightzoneNewStrip.segments = parseInt(ev.target.value, 10) || 5;
+    });
+    this.shadowRoot.querySelector("#lightzone-save-strip-btn").addEventListener("click", () => this._saveLightZoneStrip());
+
+    this.shadowRoot.querySelector("#lightzone-clear-selection-btn").addEventListener("click", () => {
+      this._lightzoneSelectedSegments = [];
+      this._renderLightZoneGrid();
+    });
+    this.shadowRoot.querySelector("#lightzone-zone-name-input").addEventListener("input", (ev) => {
+      this._lightzoneNewZoneName = ev.target.value;
+    });
+    this.shadowRoot.querySelector("#lightzone-create-zone-btn").addEventListener("click", () => this._createLightZone());
+  }
+
+  _populateLightZoneEntitySelect() {
+    const sel = this.shadowRoot.querySelector("#lightzone-strip-entity-select");
+    if (!sel || !this._hass) return;
+    const entities = Object.keys(this._hass.states)
+      .filter((id) => id.startsWith("light."))
+      .sort();
+    sel.innerHTML =
+      `<option value="">— choisir —</option>` +
+      entities
+        .map((id) => {
+          const name = (this._hass.states[id].attributes && this._hass.states[id].attributes.friendly_name) || id;
+          return `<option value="${escapeHtml(id)}">${escapeHtml(name)}</option>`;
+        })
+        .join("");
+    sel.value = this._lightzoneNewStrip.entity;
+  }
+
+  async _loadLightZoneData() {
+    try {
+      const [stripsRes, zonesRes] = await Promise.all([
+        this._hass.callWS({ type: "alex_light_studio/get_strips" }),
+        this._hass.callWS({ type: "alex_light_studio/get_light_zones" }),
+      ]);
+      this._lightzoneStrips = (stripsRes && stripsRes.strips) || {};
+      this._lightzoneZones = (zonesRes && zonesRes.zones) || {};
+    } catch (err) {
+      this._lightzoneStrips = {};
+      this._lightzoneZones = {};
+    }
+    this._populateLightZoneStripSelect();
+    this._lightzoneLastZonesSig = null;
+    this._renderLightZoneStripDependent();
+  }
+
+  _populateLightZoneStripSelect() {
+    const sel = this.shadowRoot.querySelector("#lightzone-strip-select");
+    if (!sel) return;
+    const ids = Object.keys(this._lightzoneStrips);
+    if (!ids.length) {
+      sel.innerHTML = `<option value="">Aucun bandeau — crée-en un</option>`;
+      this._lightzoneSelectedStripId = "";
+      return;
+    }
+    sel.innerHTML = ids
+      .map((id) => {
+        const s = this._lightzoneStrips[id];
+        const label = s.name || s.entity;
+        return `<option value="${escapeHtml(id)}">${escapeHtml(label)}</option>`;
+      })
+      .join("");
+    if (!this._lightzoneSelectedStripId || !this._lightzoneStrips[this._lightzoneSelectedStripId]) {
+      this._lightzoneSelectedStripId = ids[0];
+    }
+    sel.value = this._lightzoneSelectedStripId;
+  }
+
+  _renderLightZoneStripDependent() {
+    const segCard = this.shadowRoot.querySelector("#lightzone-segments-card");
+    const listCard = this.shadowRoot.querySelector("#lightzone-list-card");
+    const hasStrip = !!this._lightzoneSelectedStripId && !!this._lightzoneStrips[this._lightzoneSelectedStripId];
+    if (segCard) segCard.style.display = hasStrip ? "block" : "none";
+    if (listCard) listCard.style.display = hasStrip ? "block" : "none";
+    if (!hasStrip) return;
+    this._renderLightZoneGrid();
+    this._renderLightZoneList();
+  }
+
+  // Meme logique de resolution que _resolveGradientSegments, appliquee a un
+  // bandeau du registre partage plutot qu'a la cible de test du dégradé.
+  _resolveLightZoneStripSegments(strip) {
+    if (!strip) return 0;
+    if (strip.device_type === "aqara") {
+      const lengthEntity = strip.length_entity || gradientDefaultLengthEntity(strip.entity);
+      const st = lengthEntity && this._hass.states[lengthEntity];
+      if (st && st.state != null && !Number.isNaN(Number(st.state))) {
+        const n = Math.round(Number(st.state) * 5);
+        if (n > 0) return Math.min(50, n);
+      }
+    }
+    return strip.segments || 5;
+  }
+
+  _renderLightZoneGrid() {
+    const grid = this.shadowRoot.querySelector("#lightzone-segment-grid");
+    if (!grid) return;
+    const strip = this._lightzoneStrips[this._lightzoneSelectedStripId];
+    if (!strip) {
+      grid.innerHTML = "";
+      return;
+    }
+    const segmentCount = this._resolveLightZoneStripSegments(strip);
+
+    // Index de segment -> couleur (cyclee) de la zone existante qui le
+    // couvre deja, purement indicatif pour reperer un chevauchement avant
+    // de creer une nouvelle zone dessus.
+    const usedBy = {};
+    Object.values(this._lightzoneZones)
+      .filter((z) => z.strip_id === this._lightzoneSelectedStripId)
+      .forEach((z, i) => {
+        const color = LIGHTZONE_PALETTE[i % LIGHTZONE_PALETTE.length];
+        (z.segments || []).forEach((seg) => {
+          usedBy[seg] = color;
+        });
+      });
+
+    const cells = [];
+    for (let i = 0; i < segmentCount; i++) {
+      const selected = this._lightzoneSelectedSegments.includes(i);
+      const dot = usedBy[i] ? `<span class="used-dot" style="background:${usedBy[i]};"></span>` : "";
+      cells.push(`<div class="segment-cell${selected ? " selected" : ""}" data-index="${i}">${i + 1}${dot}</div>`);
+    }
+    grid.innerHTML = cells.join("");
+    grid.querySelectorAll(".segment-cell").forEach((cell) => {
+      cell.addEventListener("click", () => {
+        const idx = parseInt(cell.getAttribute("data-index"), 10);
+        const pos = this._lightzoneSelectedSegments.indexOf(idx);
+        if (pos === -1) this._lightzoneSelectedSegments.push(idx);
+        else this._lightzoneSelectedSegments.splice(pos, 1);
+        this._renderLightZoneGrid();
+      });
+    });
+  }
+
+  // Entity_id predit a partir du zone_id (meme convention que light.py cote
+  // integration -- voir AlexLightStudioZoneLight) : pas de recherche par nom,
+  // le panel connait deja le zone_id via get_light_zones/save_light_zone.
+  _lightzoneEntityIdFor(zoneId) {
+    return `light.alex_light_studio_zone_${zoneId.replace(/-/g, "")}`;
+  }
+
+  // Rafraichissement reactif (signature-cachee, comme _renderGradientSceneList)
+  // : appele a chaque tick hass pour que l'etat allumee/eteinte et la couleur
+  // de chaque zone restent a jour sans reconstruire la liste pour rien.
+  _renderLightZoneList() {
+    if (!this._lightzoneBuilt || !this.shadowRoot) return;
+    const list = this.shadowRoot.querySelector("#lightzone-zone-list");
+    if (!list) return;
+    const zones = Object.values(this._lightzoneZones).filter((z) => z.strip_id === this._lightzoneSelectedStripId);
+
+    const sig = JSON.stringify(
+      zones.map((z) => {
+        const st = this._hass.states[this._lightzoneEntityIdFor(z.id)];
+        return [
+          z.id,
+          z.name,
+          z.segments,
+          st ? st.state : null,
+          st && st.attributes ? st.attributes.hs_color : null,
+          st && st.attributes ? st.attributes.brightness : null,
+        ];
+      })
+    );
+    if (sig === this._lightzoneLastZonesSig) return;
+    this._lightzoneLastZonesSig = sig;
+
+    if (!zones.length) {
+      list.innerHTML = `<div class="empty">Aucune zone pour ce bandeau pour l'instant.</div>`;
+      return;
+    }
+
+    list.innerHTML = zones
+      .map((z) => {
+        const entityId = this._lightzoneEntityIdFor(z.id);
+        const st = this._hass.states[entityId];
+        const isOn = !!st && st.state === "on";
+        const color =
+          isOn && st.attributes && st.attributes.hs_color
+            ? hsvToCss(st.attributes.hs_color[0], st.attributes.hs_color[1], st.attributes.brightness || 255)
+            : "transparent";
+        const segLabel = (z.segments || [])
+          .slice()
+          .sort((a, b) => a - b)
+          .map((s) => s + 1)
+          .join(", ");
+        return `
+          <div class="zone-row" data-zone-id="${escapeHtml(z.id)}">
+            <div class="zone-swatch" style="background:${color};"></div>
+            <div class="zone-info">
+              <div class="zone-name">${escapeHtml(z.name)}</div>
+              <div class="zone-segments">Segments ${segLabel || "—"} · ${isOn ? "allumée" : "éteinte"}</div>
+            </div>
+            <button class="btn btn-outline lightzone-more-info-btn">Ouvrir</button>
+            <button class="btn btn-outline lightzone-delete-zone-btn">Supprimer</button>
+          </div>`;
+      })
+      .join("");
+
+    list.querySelectorAll(".lightzone-more-info-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const zoneId = btn.closest(".zone-row").getAttribute("data-zone-id");
+        this.dispatchEvent(
+          new CustomEvent("hass-more-info", {
+            detail: { entityId: this._lightzoneEntityIdFor(zoneId) },
+            bubbles: true,
+            composed: true,
+          })
+        );
+      });
+    });
+    list.querySelectorAll(".lightzone-delete-zone-btn").forEach((btn) => {
+      btn.addEventListener("click", () => this._deleteLightZoneZone(btn.closest(".zone-row").getAttribute("data-zone-id")));
+    });
+  }
+
+  async _saveLightZoneStrip() {
+    const s = this._lightzoneNewStrip;
+    if (!s.entity) {
+      this.shadowRoot.querySelector("#lightzone-strip-entity-select").focus();
+      return;
+    }
+    const payload = {
+      type: "alex_light_studio/save_strip",
+      entity: s.entity,
+      device_type: s.device_type,
+      friendly_name: s.friendly_name || "",
+      length_entity: s.length_entity || "",
+      name: s.name || "",
+    };
+    if (s.segments) payload.segments = s.segments;
+
+    const result = await this._hass.callWS(payload);
+    if (result && result.strip) {
+      this._lightzoneStrips[result.strip.id] = result.strip;
+      this._lightzoneSelectedStripId = result.strip.id;
+      this._lightzoneSelectedSegments = [];
+    }
+    this._lightzoneShowNewStripForm = false;
+    this.shadowRoot.querySelector("#lightzone-new-strip-form").style.display = "none";
+    this._populateLightZoneStripSelect();
+    this._lightzoneLastZonesSig = null;
+    this._renderLightZoneStripDependent();
+  }
+
+  async _deleteLightZoneStrip() {
+    const stripId = this._lightzoneSelectedStripId;
+    if (!stripId) return;
+    const errEl = this.shadowRoot.querySelector("#lightzone-strip-error");
+    if (errEl) errEl.style.display = "none";
+    try {
+      await this._hass.callWS({ type: "alex_light_studio/delete_strip", strip_id: stripId });
+    } catch (err) {
+      // Le plus probable ici : strip_in_use (des zones referencent encore
+      // ce bandeau) -- message du serveur affiche tel quel, pas besoin de
+      // le retraduire cote panel.
+      if (errEl) {
+        errEl.textContent = (err && err.message) || "Suppression impossible.";
+        errEl.style.display = "block";
+      }
+      return;
+    }
+    delete this._lightzoneStrips[stripId];
+    this._lightzoneSelectedStripId = "";
+    this._populateLightZoneStripSelect();
+    this._lightzoneLastZonesSig = null;
+    this._renderLightZoneStripDependent();
+  }
+
+  async _createLightZone() {
+    const nameInput = this.shadowRoot.querySelector("#lightzone-zone-name-input");
+    const name = (nameInput.value || "").trim();
+    if (!name || !this._lightzoneSelectedSegments.length || !this._lightzoneSelectedStripId) {
+      if (!name) nameInput.focus();
+      return;
+    }
+    const result = await this._hass.callWS({
+      type: "alex_light_studio/save_light_zone",
+      strip_id: this._lightzoneSelectedStripId,
+      name,
+      segments: this._lightzoneSelectedSegments.slice().sort((a, b) => a - b),
+    });
+    if (result && result.zone) {
+      this._lightzoneZones[result.zone.id] = result.zone;
+    }
+    this._lightzoneSelectedSegments = [];
+    nameInput.value = "";
+    this._lightzoneNewZoneName = "";
+    this._lightzoneLastZonesSig = null;
+    this._renderLightZoneGrid();
+    this._renderLightZoneList();
+  }
+
+  async _deleteLightZoneZone(zoneId) {
+    await this._hass.callWS({ type: "alex_light_studio/delete_light_zone", zone_id: zoneId });
+    delete this._lightzoneZones[zoneId];
+    this._lightzoneLastZonesSig = null;
+    this._renderLightZoneGrid();
+    this._renderLightZoneList();
   }
 
   // ===========================================================================

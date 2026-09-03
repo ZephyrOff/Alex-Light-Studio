@@ -44,6 +44,7 @@ from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.storage import Store
 
@@ -62,15 +63,20 @@ from .const import (
     SERVICE_LOAD_GRADIENT_SCENE,
     SERVICE_SAVE_GRADIENT_SCENE,
     SIGNAL_GRADIENT_SCENES_UPDATED,
+    SIGNAL_LIGHT_ZONES_UPDATED,
+    SIGNAL_STRIPS_UPDATED,
     STORAGE_KEY_GRADIENT_SCENES,
+    STORAGE_KEY_LIGHT_ZONES,
     STORAGE_KEY_ROOMS,
+    STORAGE_KEY_STRIPS,
     STORAGE_VERSION,
 )
 from .gradient import colors_to_stops, hex_to_rgb_obj, resample_stops
+from .zones import compute_zone_colors
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = ["sensor"]
+PLATFORMS = ["sensor", "light"]
 
 
 # =============================================================================
@@ -197,6 +203,45 @@ SAVE_AS_HA_SCENE_SCHEMA = {
 
 
 # =============================================================================
+# === Registre partage des bandeaux (vue Gradient ET vue LightZone) =========
+# =============================================================================
+STRIP_SCHEMA = {
+    vol.Required("entity"): cv.entity_id,
+    vol.Required("device_type"): vol.In([DEVICE_TYPE_AQARA, "hue"]),
+    vol.Optional("friendly_name", default=""): str,
+    vol.Optional("length_entity", default=""): str,
+    vol.Optional("segments"): vol.All(vol.Coerce(int), vol.Range(min=2, max=MAX_SEGMENTS)),
+    vol.Optional("name", default=""): str,
+}
+
+GET_STRIPS_SCHEMA = {vol.Required("type"): f"{DOMAIN}/get_strips"}
+
+SAVE_STRIP_SCHEMA = {
+    vol.Required("type"): f"{DOMAIN}/save_strip",
+    vol.Optional("strip_id"): str,  # absent = nouveau bandeau
+    **STRIP_SCHEMA,
+}
+
+DELETE_STRIP_SCHEMA = {vol.Required("type"): f"{DOMAIN}/delete_strip", vol.Required("strip_id"): str}
+
+
+# =============================================================================
+# === Zones de segments (vue LightZone) ======================================
+# =============================================================================
+GET_LIGHT_ZONES_SCHEMA = {vol.Required("type"): f"{DOMAIN}/get_light_zones"}
+
+SAVE_LIGHT_ZONE_SCHEMA = {
+    vol.Required("type"): f"{DOMAIN}/save_light_zone",
+    vol.Optional("zone_id"): str,  # absent = nouvelle zone
+    vol.Required("strip_id"): str,
+    vol.Required("name"): str,
+    vol.Required("segments"): vol.All(cv.ensure_list, [vol.All(vol.Coerce(int), vol.Range(min=0))]),
+}
+
+DELETE_LIGHT_ZONE_SCHEMA = {vol.Required("type"): f"{DOMAIN}/delete_light_zone", vol.Required("zone_id"): str}
+
+
+# =============================================================================
 # === Volet Gradient -- schemas de services (ex-Alex Gradient Studio) ========
 # =============================================================================
 SAVE_GRADIENT_SCENE_SCHEMA = vol.Schema(
@@ -221,13 +266,19 @@ DELETE_GRADIENT_SCENE_SCHEMA = vol.Schema({vol.Required("name"): cv.string})
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Initialise l'integration : deux stockages, commandes websocket,
-    services de degrade, capteur, et panel."""
+    """Initialise l'integration : stockages, commandes websocket, services
+    de degrade, capteur, plateforme light (zones), et panel."""
     rooms_store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY_ROOMS)
     rooms_data = await rooms_store.async_load() or {"rooms": {}}
 
     gradient_store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY_GRADIENT_SCENES)
     gradient_data = await gradient_store.async_load() or {"scenes": {}}
+
+    strips_store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY_STRIPS)
+    strips_data = await strips_store.async_load() or {"strips": {}}
+
+    light_zones_store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY_LIGHT_ZONES)
+    light_zones_data = await light_zones_store.async_load() or {"zones": {}}
 
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = {
@@ -235,6 +286,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "rooms": rooms_data.get("rooms", {}),
         "gradient_store": gradient_store,
         "gradient_scenes": gradient_data.get("scenes", {}),
+        "strips_store": strips_store,
+        "strips": strips_data.get("strips", {}),
+        "light_zones_store": light_zones_store,
+        "light_zones": light_zones_data.get("zones", {}),
+        # Peuple par light.py a l'initialisation de la plateforme ; utilise
+        # par websocket_save_light_zone pour ajouter une entite a la volee
+        # et par les entites elles-memes pour retrouver leurs consoeurs
+        # (voir AlexLightStudioZoneLight.async_added_to_hass).
+        "zone_entities": {},
+        "recompute_strip": lambda strip_id: _async_recompute_strip(hass, entry.entry_id, strip_id),
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -246,6 +307,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         websocket_api.async_register_command(hass, websocket_compute_scene)
         websocket_api.async_register_command(hass, websocket_apply_scene)
         websocket_api.async_register_command(hass, websocket_save_as_ha_scene)
+        websocket_api.async_register_command(hass, websocket_get_strips)
+        websocket_api.async_register_command(hass, websocket_save_strip)
+        websocket_api.async_register_command(hass, websocket_delete_strip)
+        websocket_api.async_register_command(hass, websocket_get_light_zones)
+        websocket_api.async_register_command(hass, websocket_save_light_zone)
+        websocket_api.async_register_command(hass, websocket_delete_light_zone)
         hass.data[DOMAIN]["ws_registered"] = True
 
     # L'entry_id courant, pour que les commandes websocket (qui n'ont pas
@@ -355,6 +422,114 @@ def _entry_data(hass: HomeAssistant) -> dict:
 async def _async_persist_rooms(hass: HomeAssistant) -> None:
     entry_data = _entry_data(hass)
     await entry_data["rooms_store"].async_save({"rooms": entry_data["rooms"]})
+
+
+async def _async_persist_strips(hass: HomeAssistant) -> None:
+    entry_data = _entry_data(hass)
+    await entry_data["strips_store"].async_save({"strips": entry_data["strips"]})
+    async_dispatcher_send(hass, SIGNAL_STRIPS_UPDATED)
+
+
+async def _async_persist_light_zones(hass: HomeAssistant) -> None:
+    entry_data = _entry_data(hass)
+    await entry_data["light_zones_store"].async_save({"zones": entry_data["light_zones"]})
+    async_dispatcher_send(hass, SIGNAL_LIGHT_ZONES_UPDATED)
+
+
+def _resolve_strip_segments(hass: HomeAssistant, strip: dict) -> int:
+    """Meme logique de resolution que _handle_load_gradient_scene (Aqara :
+    detection via l'entite longueur si disponible, repli sur le champ
+    manuel sinon ; Hue : toujours le champ manuel, aucune detection
+    possible cote Z2M)."""
+    entity_id = strip["entity"]
+    object_id = entity_id.split(".", 1)[1] if "." in entity_id else entity_id
+    segments = strip.get("segments")
+    if strip.get("device_type") == DEVICE_TYPE_AQARA:
+        length_entity = strip.get("length_entity") or f"number.{object_id}_length"
+        length_state = hass.states.get(length_entity)
+        if length_state is not None:
+            try:
+                computed = round(float(length_state.state) * 5)
+                if computed > 0:
+                    segments = min(MAX_SEGMENTS, computed)
+            except (TypeError, ValueError):
+                _LOGGER.debug("Etat non numerique pour %s, repli sur la valeur manuelle", length_entity)
+    if not segments:
+        segments = DEFAULT_SEGMENTS
+    return segments
+
+
+async def _async_recompute_strip(hass: HomeAssistant, entry_id: str, strip_id: str) -> None:
+    """Recalcule et publie l'etat combine d'un bandeau a partir de l'etat
+    courant de TOUTES ses zones (front montant OU descendant sur n'importe
+    laquelle d'entre elles) -- appele par AlexLightStudioZoneLight a chaque
+    allumage/extinction. Aucune scene precalculee : c'est justement le
+    mecanisme qui evite l'explosion combinatoire d'une scene par
+    combinaison d'etats possibles."""
+    entry_data = hass.data[DOMAIN][entry_id]
+    strip = entry_data["strips"].get(strip_id)
+    if strip is None:
+        _LOGGER.warning("Recalcul demande pour un bandeau inconnu: %s", strip_id)
+        return
+
+    zone_entities = entry_data.get("zone_entities", {})
+    zones_for_strip = [
+        {
+            "segments": cfg.get("segments", []),
+            "is_on": bool(zone_entities.get(zid)) and zone_entities[zid].is_on,
+            "color": zone_entities[zid].rgb_color_hex if zid in zone_entities else "#000000",
+        }
+        for zid, cfg in entry_data["light_zones"].items()
+        if cfg.get("strip_id") == strip_id
+    ]
+
+    entity_id = strip["entity"]
+    any_active = any(z["is_on"] for z in zones_for_strip)
+
+    if not any_active:
+        # Reponse a la question "aucune zone active" : le bandeau s'eteint
+        # completement plutot que de rester allume a zero ou de repasser
+        # sur un degrade de base.
+        await hass.services.async_call("light", "turn_off", {"entity_id": entity_id}, blocking=True)
+        return
+
+    device_type = strip["device_type"]
+    object_id = entity_id.split(".", 1)[1] if "." in entity_id else entity_id
+    entity_state = hass.states.get(entity_id)
+    attr_friendly_name = entity_state.attributes.get("friendly_name") if entity_state else None
+    friendly_name = strip.get("friendly_name") or attr_friendly_name or object_id
+
+    segments = _resolve_strip_segments(hass, strip)
+    colors = compute_zone_colors(zones_for_strip, segments)
+
+    # "state": "ON" dans le meme payload -- force l'allumage du bandeau
+    # physique en meme temps que les couleurs, au cas ou il etait deja
+    # eteint cote appareil (sinon la plupart des appareils Zigbee
+    # n'affichent rien malgre des couleurs recues). Pas de champ
+    # `brightness` ici : chaque couleur de zone porte deja sa propre
+    # luminosite "cuite" (voir zones.hsv_to_hex) -- un brightness partage
+    # assombrirait tout une seconde fois.
+    if device_type == DEVICE_TYPE_AQARA:
+        payload = {
+            "state": "ON",
+            "segment_colors": [{"segment": i + 1, "color": hex_to_rgb_obj(c)} for i, c in enumerate(colors)],
+        }
+    else:
+        payload = {"state": "ON", "gradient": colors}
+
+    await hass.services.async_call(
+        "mqtt",
+        "publish",
+        {"topic": f"zigbee2mqtt/{friendly_name}/set", "payload": json.dumps(payload)},
+        blocking=True,
+    )
+    _LOGGER.debug(
+        "Zones recalculees pour %s (%d segments, %s) : %d zone(s) active(s)",
+        entity_id,
+        segments,
+        device_type,
+        sum(1 for z in zones_for_strip if z["is_on"]),
+    )
 
 
 @websocket_api.websocket_command(GET_ROOMS_SCHEMA)
@@ -482,6 +657,144 @@ async def websocket_save_as_ha_scene(hass: HomeAssistant, connection, msg) -> No
         blocking=True,
     )
     connection.send_result(msg["id"], {"scene_entity_id": f"scene.{scene_id}"})
+
+
+# =============================================================================
+# === Registre partage des bandeaux ==========================================
+# =============================================================================
+@websocket_api.websocket_command(GET_STRIPS_SCHEMA)
+@websocket_api.async_response
+async def websocket_get_strips(hass: HomeAssistant, connection, msg) -> None:
+    connection.send_result(msg["id"], {"strips": _entry_data(hass)["strips"]})
+
+
+@websocket_api.websocket_command(SAVE_STRIP_SCHEMA)
+@websocket_api.async_response
+async def websocket_save_strip(hass: HomeAssistant, connection, msg) -> None:
+    """Cree un nouveau bandeau (pas de `strip_id` fourni) ou met a jour un
+    bandeau existant (upsert par id) -- registre partage entre la vue
+    Gradient et la vue LightZone."""
+    strips = _entry_data(hass)["strips"]
+    strip_id = msg.get("strip_id") or str(uuid.uuid4())
+    strips[strip_id] = {
+        "id": strip_id,
+        "entity": msg["entity"],
+        "device_type": msg["device_type"],
+        "friendly_name": msg.get("friendly_name", ""),
+        "length_entity": msg.get("length_entity", ""),
+        "segments": msg.get("segments"),
+        "name": msg.get("name", ""),
+    }
+    await _async_persist_strips(hass)
+    connection.send_result(msg["id"], {"strip": strips[strip_id]})
+
+
+@websocket_api.websocket_command(DELETE_STRIP_SCHEMA)
+@websocket_api.async_response
+async def websocket_delete_strip(hass: HomeAssistant, connection, msg) -> None:
+    entry_data = _entry_data(hass)
+    strip_id = msg["strip_id"]
+    still_used = [
+        z["name"] for z in entry_data["light_zones"].values() if z.get("strip_id") == strip_id
+    ]
+    if still_used:
+        connection.send_error(
+            msg["id"],
+            "strip_in_use",
+            f"Bandeau encore utilise par {len(still_used)} zone(s) : supprime-les d'abord.",
+        )
+        return
+    removed = entry_data["strips"].pop(strip_id, None)
+    if removed is not None:
+        await _async_persist_strips(hass)
+    connection.send_result(msg["id"], {"deleted": removed is not None})
+
+
+# =============================================================================
+# === Zones de segments =======================================================
+# =============================================================================
+@websocket_api.websocket_command(GET_LIGHT_ZONES_SCHEMA)
+@websocket_api.async_response
+async def websocket_get_light_zones(hass: HomeAssistant, connection, msg) -> None:
+    connection.send_result(msg["id"], {"zones": _entry_data(hass)["light_zones"]})
+
+
+@websocket_api.websocket_command(SAVE_LIGHT_ZONE_SCHEMA)
+@websocket_api.async_response
+async def websocket_save_light_zone(hass: HomeAssistant, connection, msg) -> None:
+    """Cree une nouvelle zone (pas de `zone_id` fourni) ou renomme/reassigne
+    les segments d'une zone existante (upsert par id). Une zone creee fait
+    apparaitre sa lumiere immediatement (pas de redemarrage HA requis) ; une
+    zone modifiee ne touche pas a son entite existante -- la lumiere relit
+    ses segments/son bandeau depuis la config a chaque recalcul, pas besoin
+    de la recreer."""
+    entry_id = hass.data[DOMAIN]["active_entry_id"]
+    entry_data = hass.data[DOMAIN][entry_id]
+    zones = entry_data["light_zones"]
+
+    zone_id = msg.get("zone_id")
+    is_new = zone_id is None or zone_id not in zones
+    zone_id = zone_id or str(uuid.uuid4())
+
+    zones[zone_id] = {
+        "id": zone_id,
+        "strip_id": msg["strip_id"],
+        "name": msg["name"],
+        "segments": msg["segments"],
+    }
+    await _async_persist_light_zones(hass)
+
+    if is_new:
+        add_entities = entry_data.get("light_add_entities")
+        if add_entities is not None:
+            # Import local : evite un import circulaire au chargement du
+            # module (light.py n'importe rien depuis __init__.py, mais
+            # l'inverse en haut de fichier compliquerait l'ordre de
+            # chargement des plateformes).
+            from .light import AlexLightStudioZoneLight
+
+            add_entities([AlexLightStudioZoneLight(hass, entry_id, zone_id)])
+        else:
+            _LOGGER.warning(
+                "Zone %s enregistree mais la plateforme light n'est pas encore prete "
+                "(sa lumiere apparaitra au prochain redemarrage)",
+                zone_id,
+            )
+
+    connection.send_result(msg["id"], {"zone": zones[zone_id]})
+
+
+@websocket_api.websocket_command(DELETE_LIGHT_ZONE_SCHEMA)
+@websocket_api.async_response
+async def websocket_delete_light_zone(hass: HomeAssistant, connection, msg) -> None:
+    entry_id = hass.data[DOMAIN]["active_entry_id"]
+    entry_data = hass.data[DOMAIN][entry_id]
+    zone_id = msg["zone_id"]
+
+    zone = entry_data["light_zones"].get(zone_id)
+    strip_id = zone.get("strip_id") if zone else None
+
+    removed = entry_data["light_zones"].pop(zone_id, None)
+    if removed is None:
+        connection.send_result(msg["id"], {"deleted": False})
+        return
+    await _async_persist_light_zones(hass)
+
+    entity = entry_data.get("zone_entities", {}).get(zone_id)
+    if entity is not None:
+        await entity.async_remove(force_remove=True)
+        registry = er.async_get(hass)
+        registry_entry = registry.async_get(entity.entity_id)
+        if registry_entry is not None:
+            registry.async_remove(entity.entity_id)
+
+    # La zone active retiree peut changer l'etat combine du bandeau (ex.
+    # c'etait la derniere active) -- recalcul immediat plutot que d'attendre
+    # le prochain changement d'une autre zone.
+    if strip_id is not None:
+        await _async_recompute_strip(hass, entry_id, strip_id)
+
+    connection.send_result(msg["id"], {"deleted": True})
 
 
 async def _async_register_panel(hass: HomeAssistant) -> None:
