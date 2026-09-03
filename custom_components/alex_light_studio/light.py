@@ -81,13 +81,16 @@ class AlexLightStudioZoneLight(RestoreEntity, LightEntity):
         self._attr_unique_id = f"{entry_id}_zone_{zone_id}"
         # Entity_id derive du slug stocke sur la zone (genere une seule fois
         # a la creation, voir _unique_zone_slug dans __init__.py) plutot que
-        # du zone_id brut -- lisible ("light.alex_light_studio_zone_porte_1"
-        # au lieu d'un UUID), tout en restant stable si la zone est
-        # renommee plus tard (le slug, lui, ne change jamais retroactivement).
-        # Repli sur le zone_id si une zone plus ancienne n'a pas encore de
-        # slug enregistre (retrocompatibilite, avant l'ajout de ce champ).
+        # du zone_id brut -- lisible ("light.chambre_bled_seg1" plutot qu'un
+        # UUID), tout en restant stable si la zone est renommee plus tard
+        # (le slug, lui, ne change jamais retroactivement). Pas de prefixe
+        # de namespace : _unique_zone_slug verifie deja les collisions
+        # contre les entites HA existantes au moment de la creation, pas
+        # seulement entre zones. Repli sur le zone_id si une zone plus
+        # ancienne n'a pas encore de slug enregistre (retrocompatibilite,
+        # avant l'ajout de ce champ).
         slug = zone.get("slug") or zone_id.replace("-", "")
-        self.entity_id = f"light.alex_light_studio_zone_{slug}"
+        self.entity_id = f"light.{slug}"
         self._attr_is_on = False
         self._attr_color_mode = ColorMode.HS
         self._attr_hs_color = _DEFAULT_HS_COLOR

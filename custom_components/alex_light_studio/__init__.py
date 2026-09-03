@@ -440,21 +440,28 @@ async def _async_persist_light_zones(hass: HomeAssistant) -> None:
     async_dispatcher_send(hass, SIGNAL_LIGHT_ZONES_UPDATED)
 
 
-def _unique_zone_slug(existing_zones: dict, name: str) -> str:
+def _unique_zone_slug(hass: HomeAssistant, existing_zones: dict, name: str) -> str:
     """Genere un slug lisible et unique a partir du nom d'une zone (ex.
-    "Porte 1" -> "porte_1"), pour un entity_id du type
-    light.alex_light_studio_zone_<slug> plutot qu'un identifiant opaque.
-    Suffixe numerique en cas de collision (meme convention que HA pour ses
-    propres entity_id auto-generes). Genere UNE SEULE FOIS a la creation de
-    la zone -- jamais regenere sur un renommage ulterieur, pour ne pas
-    changer l'entity_id d'une zone deja utilisee dans un tableau de bord ou
-    une automatisation."""
+    "Porte 1" -> "porte_1"), pour un entity_id du type light.<slug> plutot
+    qu'un identifiant opaque. Pas de prefixe de namespace (light.<slug>
+    directement, sans "alex_light_studio_zone_") -- verifie donc la
+    collision a la fois contre les autres zones ET contre toute entite
+    light.* deja existante dans HA, pas seulement entre zones. Suffixe
+    numerique en cas de collision (meme convention que HA pour ses propres
+    entity_id auto-generes). Genere UNE SEULE FOIS a la creation de la zone
+    -- jamais regenere sur un renommage ulterieur, pour ne pas changer
+    l'entity_id d'une zone deja utilisee dans un tableau de bord ou une
+    automatisation."""
     base = slugify(name) or "zone"
     used = {z.get("slug") for z in existing_zones.values() if z.get("slug")}
-    if base not in used:
+
+    def _taken(candidate: str) -> bool:
+        return candidate in used or hass.states.get(f"light.{candidate}") is not None
+
+    if not _taken(base):
         return base
     n = 2
-    while f"{base}_{n}" in used:
+    while _taken(f"{base}_{n}"):
         n += 1
     return f"{base}_{n}"
 
@@ -783,7 +790,7 @@ async def websocket_save_light_zone(hass: HomeAssistant, connection, msg) -> Non
     zone_id = zone_id or str(uuid.uuid4())
 
     existing = zones.get(zone_id)
-    slug = existing["slug"] if existing and existing.get("slug") else _unique_zone_slug(zones, msg["name"])
+    slug = existing["slug"] if existing and existing.get("slug") else _unique_zone_slug(hass, zones, msg["name"])
 
     zones[zone_id] = {
         "id": zone_id,

@@ -2210,13 +2210,14 @@ class AlexLightStudioPanel extends HTMLElement {
   }
 
   // Entity_id derive du slug stocke sur la zone (voir _unique_zone_slug
-  // cote integration) : lisible ("light.alex_light_studio_zone_porte_1"),
-  // deja connu localement via get_light_zones/save_light_zone, pas besoin
-  // d'un aller-retour serveur. Repli sur le zone_id pour une zone plus
-  // ancienne sans slug enregistre (retrocompatibilite).
+  // cote integration) : lisible ("light.chambre_bled_seg1"), pas de
+  // prefixe de namespace -- deja connu localement via
+  // get_light_zones/save_light_zone, pas besoin d'un aller-retour serveur.
+  // Repli sur le zone_id pour une zone plus ancienne sans slug enregistre
+  // (retrocompatibilite).
   _lightzoneEntityIdFor(zone) {
     const slug = (zone && zone.slug) || (zone && zone.id ? zone.id.replace(/-/g, "") : "");
-    return `light.alex_light_studio_zone_${slug}`;
+    return `light.${slug}`;
   }
 
   // Rafraichissement reactif (signature-cachee, comme _renderGradientSceneList)
