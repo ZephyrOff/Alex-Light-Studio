@@ -2209,11 +2209,14 @@ class AlexLightStudioPanel extends HTMLElement {
     });
   }
 
-  // Entity_id predit a partir du zone_id (meme convention que light.py cote
-  // integration -- voir AlexLightStudioZoneLight) : pas de recherche par nom,
-  // le panel connait deja le zone_id via get_light_zones/save_light_zone.
-  _lightzoneEntityIdFor(zoneId) {
-    return `light.alex_light_studio_zone_${zoneId.replace(/-/g, "")}`;
+  // Entity_id derive du slug stocke sur la zone (voir _unique_zone_slug
+  // cote integration) : lisible ("light.alex_light_studio_zone_porte_1"),
+  // deja connu localement via get_light_zones/save_light_zone, pas besoin
+  // d'un aller-retour serveur. Repli sur le zone_id pour une zone plus
+  // ancienne sans slug enregistre (retrocompatibilite).
+  _lightzoneEntityIdFor(zone) {
+    const slug = (zone && zone.slug) || (zone && zone.id ? zone.id.replace(/-/g, "") : "");
+    return `light.alex_light_studio_zone_${slug}`;
   }
 
   // Rafraichissement reactif (signature-cachee, comme _renderGradientSceneList)
@@ -2227,7 +2230,7 @@ class AlexLightStudioPanel extends HTMLElement {
 
     const sig = JSON.stringify(
       zones.map((z) => {
-        const st = this._hass.states[this._lightzoneEntityIdFor(z.id)];
+        const st = this._hass.states[this._lightzoneEntityIdFor(z)];
         return [
           z.id,
           z.name,
@@ -2248,7 +2251,7 @@ class AlexLightStudioPanel extends HTMLElement {
 
     list.innerHTML = zones
       .map((z) => {
-        const entityId = this._lightzoneEntityIdFor(z.id);
+        const entityId = this._lightzoneEntityIdFor(z);
         const st = this._hass.states[entityId];
         const isOn = !!st && st.state === "on";
         const color =
@@ -2276,9 +2279,11 @@ class AlexLightStudioPanel extends HTMLElement {
     list.querySelectorAll(".lightzone-more-info-btn").forEach((btn) => {
       btn.addEventListener("click", () => {
         const zoneId = btn.closest(".zone-row").getAttribute("data-zone-id");
+        const zone = this._lightzoneZones[zoneId];
+        if (!zone) return;
         this.dispatchEvent(
           new CustomEvent("hass-more-info", {
-            detail: { entityId: this._lightzoneEntityIdFor(zoneId) },
+            detail: { entityId: this._lightzoneEntityIdFor(zone) },
             bubbles: true,
             composed: true,
           })

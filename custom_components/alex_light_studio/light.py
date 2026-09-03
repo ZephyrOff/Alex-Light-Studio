@@ -79,13 +79,15 @@ class AlexLightStudioZoneLight(RestoreEntity, LightEntity):
         zone = hass.data[DOMAIN][entry_id]["light_zones"].get(zone_id, {})
         self._attr_name = zone.get("name") or "Zone"
         self._attr_unique_id = f"{entry_id}_zone_{zone_id}"
-        # Entity_id fixe explicitement a partir du zone_id (meme principe que
-        # sensor.py) plutot que laisse a la slugification automatique du nom
-        # -- le panel doit pouvoir predire cet entity_id des qu'il connait le
-        # zone_id (retourne par save_light_zone/get_light_zones), sans
-        # dependre d'un nom qui peut changer ou contenir des accents.
-        zone_slug = zone_id.replace("-", "")
-        self.entity_id = f"light.alex_light_studio_zone_{zone_slug}"
+        # Entity_id derive du slug stocke sur la zone (genere une seule fois
+        # a la creation, voir _unique_zone_slug dans __init__.py) plutot que
+        # du zone_id brut -- lisible ("light.alex_light_studio_zone_porte_1"
+        # au lieu d'un UUID), tout en restant stable si la zone est
+        # renommee plus tard (le slug, lui, ne change jamais retroactivement).
+        # Repli sur le zone_id si une zone plus ancienne n'a pas encore de
+        # slug enregistre (retrocompatibilite, avant l'ajout de ce champ).
+        slug = zone.get("slug") or zone_id.replace("-", "")
+        self.entity_id = f"light.alex_light_studio_zone_{slug}"
         self._attr_is_on = False
         self._attr_color_mode = ColorMode.HS
         self._attr_hs_color = _DEFAULT_HS_COLOR
@@ -141,11 +143,64 @@ class AlexLightStudioZoneLight(RestoreEntity, LightEntity):
         elif ATTR_COLOR_TEMP_KELVIN in kwargs:
             self._attr_color_temp_kelvin = kwargs[ATTR_COLOR_TEMP_KELVIN]
             self._attr_color_mode = ColorMode.COLOR_TEMP
-        if ATTR_BRIGHTNESS in kwargs:
+
+        brightness_changed = ATTR_BRIGHTNESS in kwargs
+        if brightness_changed:
             self._attr_brightness = kwargs[ATTR_BRIGHTNESS]
+        elif not self._attr_is_on:
+            # Premier allumage de cette zone, sans luminosite explicite :
+            # rejoint la luminosite courante du bandeau si une autre zone y
+            # est deja active, plutot que de reintroduire un ecart entre
+            # segments (voir _async_sync_sibling_brightness).
+            sibling_brightness = self._sibling_active_brightness()
+            if sibling_brightness is not None:
+                self._attr_brightness = sibling_brightness
+
         self._attr_is_on = True
         self.async_write_ha_state()
+
+        if brightness_changed:
+            await self._async_sync_sibling_brightness()
+
         await self._async_recompute_parent_strip()
+
+    def sync_brightness(self, brightness: int) -> None:
+        """Appele par _async_sync_strip_brightness (cote __init__.py) pour
+        aligner cette zone sur la luminosite d'une autre zone du meme
+        bandeau. Mise a jour directe, pas d'appel a async_turn_on -- cette
+        zone est deja allumee, et on ne veut pas redeclencher sa propre
+        propagation ni un recalcul redondant du bandeau (celui de la zone a
+        l'origine du changement suffit, il a lieu juste apres)."""
+        if self._attr_brightness == brightness:
+            return
+        self._attr_brightness = brightness
+        self.async_write_ha_state()
+
+    def _sibling_active_brightness(self) -> int | None:
+        """Luminosite d'une zone deja active sur le meme bandeau, s'il y en
+        a une -- pour qu'une zone qui s'allume rejoigne le niveau courant
+        plutot que d'introduire un ecart des le depart."""
+        zone = self._zone
+        if zone is None:
+            return None
+        entry_data = self.hass.data[DOMAIN][self._entry_id]
+        zone_entities = entry_data.get("zone_entities", {})
+        for zid, cfg in entry_data["light_zones"].items():
+            if zid == self._zone_id or cfg.get("strip_id") != zone["strip_id"]:
+                continue
+            entity = zone_entities.get(zid)
+            if entity is not None and entity.is_on:
+                return entity.brightness
+        return None
+
+    async def _async_sync_sibling_brightness(self) -> None:
+        zone = self._zone
+        if zone is None:
+            return
+        sync = self.hass.data[DOMAIN][self._entry_id].get("sync_strip_brightness")
+        if sync is None:
+            return
+        await sync(zone["strip_id"], self._attr_brightness, self._zone_id)
 
     async def async_turn_off(self, **kwargs) -> None:
         self._attr_is_on = False

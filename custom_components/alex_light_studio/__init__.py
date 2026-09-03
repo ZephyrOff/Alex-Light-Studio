@@ -47,6 +47,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.storage import Store
+from homeassistant.util import slugify
 
 from . import harmony
 from .const import (
@@ -296,6 +297,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # (voir AlexLightStudioZoneLight.async_added_to_hass).
         "zone_entities": {},
         "recompute_strip": lambda strip_id: _async_recompute_strip(hass, entry.entry_id, strip_id),
+        "sync_strip_brightness": lambda strip_id, brightness, source_zone_id: _async_sync_strip_brightness(
+            hass, entry.entry_id, strip_id, brightness, source_zone_id
+        ),
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -436,6 +440,25 @@ async def _async_persist_light_zones(hass: HomeAssistant) -> None:
     async_dispatcher_send(hass, SIGNAL_LIGHT_ZONES_UPDATED)
 
 
+def _unique_zone_slug(existing_zones: dict, name: str) -> str:
+    """Genere un slug lisible et unique a partir du nom d'une zone (ex.
+    "Porte 1" -> "porte_1"), pour un entity_id du type
+    light.alex_light_studio_zone_<slug> plutot qu'un identifiant opaque.
+    Suffixe numerique en cas de collision (meme convention que HA pour ses
+    propres entity_id auto-generes). Genere UNE SEULE FOIS a la creation de
+    la zone -- jamais regenere sur un renommage ulterieur, pour ne pas
+    changer l'entity_id d'une zone deja utilisee dans un tableau de bord ou
+    une automatisation."""
+    base = slugify(name) or "zone"
+    used = {z.get("slug") for z in existing_zones.values() if z.get("slug")}
+    if base not in used:
+        return base
+    n = 2
+    while f"{base}_{n}" in used:
+        n += 1
+    return f"{base}_{n}"
+
+
 def _resolve_strip_segments(hass: HomeAssistant, strip: dict) -> int:
     """Meme logique de resolution que _handle_load_gradient_scene (Aqara :
     detection via l'entite longueur si disponible, repli sur le champ
@@ -530,6 +553,29 @@ async def _async_recompute_strip(hass: HomeAssistant, entry_id: str, strip_id: s
         device_type,
         sum(1 for z in zones_for_strip if z["is_on"]),
     )
+
+
+async def _async_sync_strip_brightness(
+    hass: HomeAssistant, entry_id: str, strip_id: str, brightness: int, source_zone_id: str
+) -> None:
+    """Aligne la luminosite de toutes les AUTRES zones actives d'un meme
+    bandeau sur celle qui vient de changer -- pallie un artefact materiel
+    observe sur certains bandeaux Aqara ou des segments a des niveaux de
+    luminosite tres eloignes affichent une teinte perceptiblement decalee
+    (comportement non lineaire des LED a bas courant, pas un bug de
+    conversion : hsv_to_hex/kelvin_to_hex ne deplacent jamais la teinte
+    quand seule la valeur change). Mise a jour directe des entites soeurs
+    (pas de passage par async_turn_on, qui redeclencherait chacune sa propre
+    synchronisation et son propre recalcul en boucle) ; le recalcul du
+    bandeau lui-meme n'a lieu qu'une fois, juste apres, cote appelant."""
+    entry_data = hass.data[DOMAIN][entry_id]
+    zone_entities = entry_data.get("zone_entities", {})
+    for zid, cfg in entry_data["light_zones"].items():
+        if zid == source_zone_id or cfg.get("strip_id") != strip_id:
+            continue
+        entity = zone_entities.get(zid)
+        if entity is not None and entity.is_on:
+            entity.sync_brightness(brightness)
 
 
 @websocket_api.websocket_command(GET_ROOMS_SCHEMA)
@@ -736,11 +782,15 @@ async def websocket_save_light_zone(hass: HomeAssistant, connection, msg) -> Non
     is_new = zone_id is None or zone_id not in zones
     zone_id = zone_id or str(uuid.uuid4())
 
+    existing = zones.get(zone_id)
+    slug = existing["slug"] if existing and existing.get("slug") else _unique_zone_slug(zones, msg["name"])
+
     zones[zone_id] = {
         "id": zone_id,
         "strip_id": msg["strip_id"],
         "name": msg["name"],
         "segments": msg["segments"],
+        "slug": slug,
     }
     await _async_persist_light_zones(hass)
 
