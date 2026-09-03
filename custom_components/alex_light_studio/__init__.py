@@ -508,6 +508,7 @@ async def _async_recompute_strip(hass: HomeAssistant, entry_id: str, strip_id: s
             "segments": cfg.get("segments", []),
             "is_on": bool(zone_entities.get(zid)) and zone_entities[zid].is_on,
             "color": zone_entities[zid].rgb_color_hex if zid in zone_entities else "#000000",
+            "brightness": zone_entities[zid].brightness if zid in zone_entities else None,
         }
         for zid, cfg in entry_data["light_zones"].items()
         if cfg.get("strip_id") == strip_id
@@ -532,20 +533,27 @@ async def _async_recompute_strip(hass: HomeAssistant, entry_id: str, strip_id: s
     segments = _resolve_strip_segments(hass, strip)
     colors = compute_zone_colors(zones_for_strip, segments)
 
+    # Luminosite native du bandeau (0-255 HA -> 0-254 Z2M) plutot que cuite
+    # dans chaque couleur RVB -- voir AlexLightStudioZoneLight.rgb_color_hex
+    # pour le detail du probleme que ca corrige (derive de teinte vers le
+    # blanc a basse luminosite sur Aqara). Les zones etant synchronisees en
+    # luminosite entre elles, le maximum des zones actives suffit comme
+    # valeur representative du bandeau.
+    active_brightnesses = [z["brightness"] for z in zones_for_strip if z["is_on"] and z["brightness"] is not None]
+    brightness_254 = min(254, max(active_brightnesses)) if active_brightnesses else 254
+
     # "state": "ON" dans le meme payload -- force l'allumage du bandeau
     # physique en meme temps que les couleurs, au cas ou il etait deja
     # eteint cote appareil (sinon la plupart des appareils Zigbee
-    # n'affichent rien malgre des couleurs recues). Pas de champ
-    # `brightness` ici : chaque couleur de zone porte deja sa propre
-    # luminosite "cuite" (voir zones.hsv_to_hex) -- un brightness partage
-    # assombrirait tout une seconde fois.
+    # n'affichent rien malgre des couleurs recues).
     if device_type == DEVICE_TYPE_AQARA:
         payload = {
             "state": "ON",
+            "brightness": brightness_254,
             "segment_colors": [{"segment": i + 1, "color": hex_to_rgb_obj(c)} for i, c in enumerate(colors)],
         }
     else:
-        payload = {"state": "ON", "gradient": colors}
+        payload = {"state": "ON", "brightness": brightness_254, "gradient": colors}
 
     await hass.services.async_call(
         "mqtt",

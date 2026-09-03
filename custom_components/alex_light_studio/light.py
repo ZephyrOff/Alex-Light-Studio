@@ -35,9 +35,13 @@ _LOGGER = logging.getLogger(__name__)
 # Etat par defaut d'une zone jamais encore allumee (pas de RestoreEntity a
 # lire) -- ambre chaud plutot que blanc pur, plus flatteur comme premiere
 # impression sur un bandeau de nuance chaude. Mode couleur par defaut : HS
-# (coherent avec cette teinte de depart).
+# (coherent avec cette teinte de depart). Luminosite de depart volontairement
+# basse (~10%) plutot qu'un niveau confortable : la toute premiere activation
+# d'une zone fraiche (jamais allumee, donc sans historique RestoreEntity)
+# passe directement d'eteint a ce niveau sans transition -- un saut a un
+# niveau eleve se voit davantage comme un flash qu'un saut a un niveau bas.
 _DEFAULT_HS_COLOR = (30.0, 80.0)
-_DEFAULT_BRIGHTNESS = 200
+_DEFAULT_BRIGHTNESS = 26
 _DEFAULT_COLOR_TEMP_KELVIN = 3000
 
 
@@ -127,17 +131,34 @@ class AlexLightStudioZoneLight(RestoreEntity, LightEntity):
 
     @property
     def rgb_color_hex(self) -> str:
-        """Couleur hex actuelle de cette zone, luminosite comprise --
-        consommee par le recalcul du bandeau parent (voir
-        __init__._async_recompute_strip). #000000 si eteinte. Suit le mode
-        courant : conversion HS ou temperature selon le dernier reglage."""
+        """Couleur hex PLEINE VALEUR de cette zone (luminosite non comprise)
+        -- consommee par le recalcul du bandeau parent (voir
+        __init__._async_recompute_strip), qui applique desormais la
+        luminosite via le champ `brightness` natif du payload MQTT plutot
+        que "cuite" dans chaque couleur RVB individuellement. #000000 si
+        eteinte. Suit le mode courant : conversion HS ou temperature selon
+        le dernier reglage.
+
+        Avant ce changement, la luminosite etait cuite ici (value = luminosite
+        / 255) -- observe en pratique sur les bandeaux Aqara : a basse
+        luminosite, la couleur derive vers le blanc plutot que de simplement
+        s'assombrir en gardant sa teinte. La conversion HSV/Kelvin -> RVB
+        elle-meme reste mathematiquement correcte (verifie : une valeur plus
+        basse ne devrait theoriquement jamais deplacer la teinte), le souci
+        vient tres probablement d'un plancher materiel par canal R/G/B sur
+        cet appareil a bas niveau de PWM -- pas quelque chose de corrigeable
+        cote calcul RVB. Laisser l'appareil gerer nativement sa propre
+        luminosite (comme il le fait deja pour une couleur unie classique)
+        evite cet artefact. Rendu possible du fait que la luminosite est
+        maintenant synchronisee entre toutes les zones d'un meme bandeau --
+        plus besoin d'une luminosite par segment individuelle dans le RVB
+        pour avoir un rendu par zone coherent."""
         if not self._attr_is_on:
             return "#000000"
-        value = (self._attr_brightness or 255) / 255
         if self._attr_color_mode == ColorMode.COLOR_TEMP:
-            return kelvin_to_hex(self._attr_color_temp_kelvin or _DEFAULT_COLOR_TEMP_KELVIN, value)
+            return kelvin_to_hex(self._attr_color_temp_kelvin or _DEFAULT_COLOR_TEMP_KELVIN, 1.0)
         hue, sat = self._attr_hs_color
-        return hsv_to_hex(hue, sat / 100, value)
+        return hsv_to_hex(hue, sat / 100, 1.0)
 
     async def async_turn_on(self, **kwargs) -> None:
         if ATTR_HS_COLOR in kwargs:
