@@ -149,16 +149,16 @@ const ROLE_LABELS = { primary: "Principale", accent: "Accentuation", ambient: "A
 // furniture_to_zone_inputs). "defaultElevation" : hauteur de pose par
 // defaut au-dessus du sol -- une TV/un moniteur ne reposent pas au sol.
 const FURNITURE_TYPES = {
-  sofa: { label: "Canapé", width: 1.8, depth: 0.85, height: 0.8, category: "cozy", color: "#6d4c41", defaultElevation: 0 },
-  armchair: { label: "Fauteuil", width: 0.8, depth: 0.8, height: 0.85, category: "cozy", color: "#795548", defaultElevation: 0 },
-  bed: { label: "Lit", width: 1.6, depth: 2.0, height: 0.55, category: "cozy", color: "#8d6e63", defaultElevation: 0 },
-  tv: { label: "Télévision", width: 1.1, depth: 0.08, height: 0.65, category: "screen", color: "#212121", defaultElevation: 0.5 },
-  monitor: { label: "Moniteur PC", width: 0.6, depth: 0.2, height: 0.4, category: "screen", color: "#212121", defaultElevation: 0.75 },
-  table: { label: "Table", width: 1.2, depth: 0.8, height: 0.75, category: "neutral", color: "#a1887f", defaultElevation: 0 },
-  desk: { label: "Bureau", width: 1.2, depth: 0.6, height: 0.75, category: "neutral", color: "#a1887f", defaultElevation: 0 },
-  bookshelf: { label: "Bibliothèque", width: 0.9, depth: 0.3, height: 1.8, category: "neutral", color: "#6d4c41", defaultElevation: 0 },
-  plant: { label: "Plante", width: 0.4, depth: 0.4, height: 1.2, category: "neutral", color: "#2e7d32", defaultElevation: 0 },
-  other: { label: "Autre", width: 0.6, depth: 0.6, height: 0.8, category: "neutral", color: "#616161", defaultElevation: 0 },
+  sofa: { label: "Canapé", width: 1.8, depth: 0.85, height: 0.8, category: "cozy", color: "#6d4c41", defaultElevation: 0, icon: "mdi:sofa" },
+  armchair: { label: "Fauteuil", width: 0.8, depth: 0.8, height: 0.85, category: "cozy", color: "#795548", defaultElevation: 0, icon: "mdi:seat-recline-normal" },
+  bed: { label: "Lit", width: 1.6, depth: 2.0, height: 0.55, category: "cozy", color: "#8d6e63", defaultElevation: 0, icon: "mdi:bed-double" },
+  tv: { label: "Télévision", width: 1.1, depth: 0.08, height: 0.65, category: "screen", color: "#212121", defaultElevation: 0.5, icon: "mdi:television" },
+  monitor: { label: "Moniteur PC", width: 0.6, depth: 0.2, height: 0.4, category: "screen", color: "#212121", defaultElevation: 0.75, icon: "mdi:monitor" },
+  table: { label: "Table", width: 1.2, depth: 0.8, height: 0.75, category: "neutral", color: "#a1887f", defaultElevation: 0, icon: "mdi:table-furniture" },
+  desk: { label: "Bureau", width: 1.2, depth: 0.6, height: 0.75, category: "neutral", color: "#a1887f", defaultElevation: 0, icon: "mdi:desk" },
+  bookshelf: { label: "Bibliothèque", width: 0.9, depth: 0.3, height: 1.8, category: "neutral", color: "#6d4c41", defaultElevation: 0, icon: "mdi:bookshelf" },
+  plant: { label: "Plante", width: 0.4, depth: 0.4, height: 1.2, category: "neutral", color: "#2e7d32", defaultElevation: 0, icon: "mdi:flower" },
+  other: { label: "Autre", width: 0.6, depth: 0.6, height: 0.8, category: "neutral", color: "#616161", defaultElevation: 0, icon: "mdi:cube-outline" },
 };
 
 // Miroir JS de harmony.derive_role (Python) -- uniquement pour l'apercu
@@ -255,7 +255,7 @@ function gradientDefaultLengthEntity(entityId) {
   return objectId ? `number.${objectId}_length` : null;
 }
 
-const MOUNT_TYPE_ICONS = { ceiling: "\u2B24", wall: "\u25A0", desk: "\u25B2" }; // cercle / carre / triangle plein, distinction visuelle rapide sans dependre d'icones externes
+const MOUNT_TYPE_ICONS = { ceiling: "mdi:ceiling-light", wall: "mdi:wall-sconce-round-variant", desk: "mdi:desk-lamp" };
 
 // Cycle de couleurs pour le petit point "deja utilise par une autre zone"
 // dans la grille de segments (vue LightZone) -- purement indicatif, sans
@@ -552,139 +552,265 @@ class AlexLightStudioPanel extends HTMLElement {
   _renderShell() {
     this.shadowRoot.innerHTML = `
       <style>
+        /* ===================================================================
+         * Systeme de design "sombre premium" -- variables locales au host,
+         * construites PAR-DESSUS les variables HA (--primary-color etc.)
+         * pour rester coherent avec le theme HA actif tout en donnant au
+         * panel sa propre identite visuelle (surfaces en degrade, lueurs
+         * d'accent, ombres portees). Aucune classe/ID existant renomme --
+         * uniquement les valeurs et quelques regles additives.
+         * =================================================================== */
         :host {
+          --als-bg: #0a0a0f;
+          --als-surface: #16161f;
+          --als-surface-2: #1c1c28;
+          --als-surface-3: #22222f;
+          --als-border: rgba(255,255,255,.07);
+          --als-border-strong: rgba(255,255,255,.14);
+          --als-accent: var(--primary-color, #03a9f4);
+          --als-accent-rgb: var(--rgb-primary-color, 3,169,244);
+          --als-accent-2: #7c4dff;
+          --als-text: var(--primary-text-color, #f1f1f6);
+          --als-text-dim: var(--secondary-text-color, #9696a5);
+          --als-radius-lg: 18px;
+          --als-radius: 12px;
+          --als-radius-sm: 8px;
+          --als-shadow: 0 14px 34px -12px rgba(0,0,0,.6), 0 2px 8px rgba(0,0,0,.35);
+          --als-shadow-sm: 0 4px 14px -4px rgba(0,0,0,.45);
+          --als-glow: 0 4px 18px -2px rgba(var(--als-accent-rgb),.45);
+
           display: block; height: 100%; overflow: hidden;
-          background: var(--primary-background-color, #111);
-          color: var(--primary-text-color, #fff);
-          font-family: var(--paper-font-body1_-_font-family, Roboto, sans-serif);
+          background:
+            radial-gradient(circle at 12% -10%, rgba(124,77,255,.14), transparent 42%),
+            radial-gradient(circle at 88% 0%, rgba(var(--als-accent-rgb),.12), transparent 48%),
+            var(--als-bg);
+          color: var(--als-text);
+          font-family: var(--paper-font-body1_-_font-family, "Inter", Roboto, sans-serif);
           box-sizing: border-box;
+          -webkit-font-smoothing: antialiased;
         }
         * { box-sizing: border-box; }
+        *::-webkit-scrollbar { width: 9px; height: 9px; }
+        *::-webkit-scrollbar-track { background: transparent; }
+        *::-webkit-scrollbar-thumb { background: rgba(255,255,255,.14); border-radius: 8px; }
+        *::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.22); }
+
         .header {
-          display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 16px 24px;
-          background: var(--app-header-background-color, var(--primary-color, #03a9f4));
+          display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 16px 26px;
+          background: linear-gradient(120deg, var(--als-accent), var(--als-accent-2) 150%);
+          box-shadow: 0 6px 24px -8px rgba(0,0,0,.55);
+          position: relative; z-index: 1;
         }
         .header button.menu-btn {
-          display: none; width: 40px; height: 40px; border-radius: 8px; border: none;
-          background: transparent; color: white; cursor: pointer;
+          display: none; width: 40px; height: 40px; border-radius: var(--als-radius-sm); border: none;
+          background: rgba(255,255,255,.14); color: white; cursor: pointer;
           align-items: center; justify-content: center; flex-shrink: 0;
+          transition: background .15s ease;
         }
-        .header button.menu-btn svg { width: 24px; height: 24px; fill: currentColor; }
+        .header button.menu-btn:hover { background: rgba(255,255,255,.24); }
+        .header button.menu-btn svg { width: 22px; height: 22px; fill: currentColor; }
         @media (max-width: 870px) { .header button.menu-btn { display: flex; } }
-        .header h1 { margin: 0; font-size: 20px; font-weight: 500; color: white; flex: 1; }
-        .layout { display: flex; height: calc(100% - 64px); }
+        .header h1 {
+          margin: 0; font-size: 19px; font-weight: 700; color: white; flex: 1;
+          letter-spacing: .01em; text-shadow: 0 1px 3px rgba(0,0,0,.25);
+        }
+        .header .actions .btn-outline {
+          background: rgba(255,255,255,.1); color: rgba(255,255,255,.85);
+          border: 1px solid rgba(255,255,255,.22);
+        }
+        .header .actions .btn-outline:hover { background: rgba(255,255,255,.2); color: white; border-color: rgba(255,255,255,.4); }
+        .header .actions .btn-outline.nav-active {
+          background: rgba(255,255,255,.94); color: var(--als-accent); border-color: transparent;
+          box-shadow: 0 2px 10px rgba(0,0,0,.25);
+        }
+        .header #new-room-btn { background: rgba(255,255,255,.94); color: var(--als-accent); border: none; }
+        .header #new-room-btn:hover { background: white; }
+        .nav-icon { --mdc-icon-size: 17px; margin-right: 5px; vertical-align: -3px; }
+
+        .layout { display: flex; height: calc(100% - 66px); }
         .sidebar {
-          width: 300px; flex: 0 0 300px; overflow-y: auto;
-          border-right: 1px solid var(--divider-color, #333); padding: 12px;
+          width: 296px; flex: 0 0 296px; overflow-y: auto;
+          border-right: 1px solid var(--als-border); padding: 14px;
+          background: linear-gradient(180deg, rgba(255,255,255,.025), transparent 200px);
         }
-        .content { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+        .content { flex: 1; overflow-y: auto; padding: 22px; display: flex; flex-direction: column; gap: 18px; }
+
         .card {
-          background: var(--card-background-color, #1e1e1e); border-radius: 16px; padding: 16px;
+          background: linear-gradient(160deg, var(--als-surface-2), var(--als-surface));
+          border: 1px solid var(--als-border);
+          border-radius: var(--als-radius-lg); padding: 20px;
+          box-shadow: var(--als-shadow);
         }
-        .card h2 { margin: 0 0 10px; font-size: 14px; font-weight: 600; }
+        .card h2 {
+          margin: 0 0 14px; font-size: 12px; font-weight: 700;
+          text-transform: uppercase; letter-spacing: .08em; color: var(--als-text-dim);
+        }
+
         .room-row {
-          display: flex; align-items: center; gap: 8px; padding: 8px 10px;
-          border-radius: 8px; cursor: pointer; margin-bottom: 4px; font-size: 13px;
+          display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+          border-radius: var(--als-radius-sm); cursor: pointer; margin-bottom: 4px; font-size: 13px;
+          border: 1px solid transparent; transition: background .15s ease, border-color .15s ease;
         }
-        .room-row:hover { background: rgba(255,255,255,.06); }
-        .room-row.selected { background: rgba(var(--rgb-primary-color,3,169,244),.18); }
-        .room-row .del-btn { margin-left: auto; opacity: .6; cursor: pointer; }
-        .room-row .del-btn:hover { opacity: 1; }
+        .room-row:hover { background: rgba(255,255,255,.05); }
+        .room-row.selected {
+          background: linear-gradient(120deg, rgba(var(--als-accent-rgb),.22), rgba(124,77,255,.14));
+          border-color: rgba(var(--als-accent-rgb),.35);
+          box-shadow: inset 2px 0 0 var(--als-accent);
+        }
+        .room-row .del-btn { margin-left: auto; opacity: .5; cursor: pointer; transition: opacity .15s ease, color .15s ease; }
+        .room-row .del-btn:hover { opacity: 1; color: var(--error-color, #ff6b6b); }
+
         .btn {
-          padding: 9px 16px; border-radius: 10px; border: none; cursor: pointer;
-          font-size: 13px; font-weight: 600;
+          padding: 10px 18px; border-radius: var(--als-radius); border: none; cursor: pointer;
+          font-size: 13px; font-weight: 700; letter-spacing: .01em;
+          transition: transform .12s ease, box-shadow .12s ease, filter .12s ease, background .15s ease, border-color .15s ease, color .15s ease;
         }
-        .btn-primary { background: var(--primary-color, #03a9f4); color: white; }
-        .btn-outline { background: transparent; color: var(--secondary-text-color); border: 1px solid var(--divider-color, #444); }
-        .btn:disabled { opacity: .4; cursor: not-allowed; }
-        input[type="text"], select {
-          padding: 8px 10px; border-radius: 8px; border: 1px solid var(--divider-color, #444);
-          background: var(--card-background-color, #1e1e1e); color: var(--primary-text-color, #fff);
-          font-size: 13px; width: 100%;
+        .btn-primary {
+          background: linear-gradient(135deg, var(--als-accent), var(--als-accent-2));
+          color: white; box-shadow: var(--als-glow);
         }
-        .row { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
-        .row label { flex: 0 0 100px; font-size: 12px; color: var(--secondary-text-color); }
+        .btn-primary:hover { filter: brightness(1.08); transform: translateY(-1px); }
+        .btn-primary:active { transform: translateY(0) scale(.98); }
+        .btn-outline {
+          background: rgba(255,255,255,.03); color: var(--als-text-dim);
+          border: 1px solid var(--als-border-strong);
+        }
+        .btn-outline:hover { border-color: var(--als-accent); color: var(--als-text); background: rgba(var(--als-accent-rgb),.08); }
+        .btn-outline:active { transform: scale(.98); }
+        .btn:disabled { opacity: .35; cursor: not-allowed; transform: none !important; filter: none !important; }
+
+        input[type="text"], input[type="number"], select {
+          padding: 9px 12px; border-radius: var(--als-radius-sm); border: 1px solid var(--als-border-strong);
+          background: var(--als-surface); color: var(--als-text);
+          font-size: 13px; width: 100%; transition: border-color .15s ease, box-shadow .15s ease;
+        }
+        input[type="text"]:focus, input[type="number"]:focus, select:focus {
+          outline: none; border-color: var(--als-accent); box-shadow: 0 0 0 3px rgba(var(--als-accent-rgb),.2);
+        }
+        input[type="checkbox"] { accent-color: var(--als-accent); width: 17px; height: 17px; cursor: pointer; }
+
+        input[type="range"] {
+          -webkit-appearance: none; appearance: none; width: 100%; height: 6px; border-radius: 6px;
+          background: linear-gradient(90deg, var(--als-accent), var(--als-accent-2));
+          cursor: pointer;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+          -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%;
+          background: white; border: 3px solid var(--als-accent);
+          box-shadow: 0 2px 6px rgba(0,0,0,.4); cursor: pointer;
+        }
+        input[type="range"]::-moz-range-thumb {
+          width: 18px; height: 18px; border-radius: 50%; background: white;
+          border: 3px solid var(--als-accent); box-shadow: 0 2px 6px rgba(0,0,0,.4); cursor: pointer;
+        }
+        input[type="range"]::-moz-range-track { background: transparent; }
+
+        .row { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+        .row label { flex: 0 0 100px; font-size: 12px; color: var(--als-text-dim); font-weight: 600; }
         .row > *:not(label) { flex: 1; min-width: 120px; }
+
         #canvas-wrap {
-          background: var(--card-background-color, #1e1e1e); border-radius: 16px; padding: 10px;
-          border: 1px dashed var(--divider-color, #444);
+          background: var(--als-surface); border-radius: var(--als-radius-lg); padding: 10px;
+          border: 1px dashed var(--als-border-strong); box-shadow: var(--als-shadow-sm);
         }
-        svg#plan { width: 100%; height: auto; display: block; cursor: crosshair; touch-action: none; }
-        .hint { font-size: 12px; color: var(--secondary-text-color); margin-top: 8px; line-height: 1.4; }
-        .empty { font-size: 13px; color: var(--secondary-text-color); padding: 8px 0; }
-        .error { color: var(--error-color, #db4437); font-size: 13px; }
+        svg#plan { width: 100%; height: auto; display: block; cursor: crosshair; touch-action: none; border-radius: var(--als-radius); }
+        .hint {
+          font-size: 12px; color: var(--als-text-dim); margin-top: 8px; line-height: 1.5;
+          padding-left: 10px; border-left: 2px solid var(--als-border-strong);
+        }
+        .empty {
+          font-size: 13px; color: var(--als-text-dim); padding: 22px 0; text-align: center;
+          display: flex; flex-direction: column; align-items: center; gap: 8px;
+        }
+        .empty ha-icon { --mdc-icon-size: 30px; opacity: .3; }
+        .error { color: var(--error-color, #ff6b6b); font-size: 13px; }
         .light-item {
-          display: flex; align-items: center; gap: 8px; padding: 6px 8px;
-          border: 1px solid var(--divider-color, #333); border-radius: 8px; margin-bottom: 6px; font-size: 12px;
+          display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+          background: var(--als-surface); border: 1px solid var(--als-border); border-radius: var(--als-radius-sm);
+          margin-bottom: 6px; font-size: 12px; transition: border-color .15s ease;
         }
-        .light-item .del-btn { margin-left: auto; cursor: pointer; opacity: .6; }
-        .light-item .del-btn:hover { opacity: 1; }
+        .light-item:hover { border-color: var(--als-border-strong); }
+        .light-item .del-btn { margin-left: auto; cursor: pointer; opacity: .5; transition: opacity .15s ease, color .15s ease; }
+        .light-item .del-btn:hover { opacity: 1; color: var(--error-color, #ff6b6b); }
         .actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
         /* --- Onglets de placement (Lumière/Zone/Meuble) -- un seul bloc
          * visuel (selecteur + contenu) plutot que plusieurs cartes
          * separees, pour eviter l'impression d'options eparpillees. */
-        .seg-tabs { display: flex; gap: 6px; margin-bottom: 16px; }
+        .seg-tabs { display: flex; gap: 6px; margin-bottom: 18px; background: var(--als-surface); padding: 5px; border-radius: var(--als-radius); border: 1px solid var(--als-border); }
         .seg-tab {
-          flex: 1; padding: 9px 8px; border-radius: 8px; text-align: center;
-          font-size: 13px; font-weight: 600; cursor: pointer;
-          background: transparent; color: var(--secondary-text-color);
-          border: 1px solid var(--divider-color, #444);
+          flex: 1; padding: 9px 8px; border-radius: var(--als-radius-sm); text-align: center;
+          font-size: 13px; font-weight: 700; cursor: pointer;
+          background: transparent; color: var(--als-text-dim);
+          border: none; transition: background .15s ease, color .15s ease, box-shadow .15s ease;
         }
-        .seg-tab.active { background: var(--primary-color, #03a9f4); color: white; border-color: transparent; }
+        .seg-tab:hover { color: var(--als-text); }
+        .seg-tab.active {
+          background: linear-gradient(135deg, var(--als-accent), var(--als-accent-2));
+          color: white; box-shadow: var(--als-glow);
+        }
+        .seg-tab ha-icon { --mdc-icon-size: 16px; margin-right: 4px; vertical-align: -3px; }
 
         /* --- Boutons "mur visible" (vue 3D) -- multi-selection (pas
          * exclusifs comme les onglets de placement), un par mur du contour. */
         .wall-toggle {
-          padding: 6px 10px; border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer;
-          background: rgba(var(--rgb-primary-color,3,169,244),.18); color: var(--primary-text-color, #fff);
-          border: 1px solid var(--primary-color, #03a9f4);
+          padding: 6px 12px; border-radius: 999px; font-size: 12px; font-weight: 700; cursor: pointer;
+          background: rgba(var(--als-accent-rgb),.16); color: var(--als-text);
+          border: 1px solid rgba(var(--als-accent-rgb),.5); transition: all .15s ease;
         }
-        .wall-toggle.hidden-wall { background: transparent; color: var(--secondary-text-color); border-color: var(--divider-color, #444); text-decoration: line-through; }
+        .wall-toggle:hover { background: rgba(var(--als-accent-rgb),.26); }
+        .wall-toggle.hidden-wall { background: transparent; color: var(--als-text-dim); border-color: var(--als-border-strong); text-decoration: line-through; }
 
         /* --- Vue Gradient (ex-Alex Gradient Studio) -------------------- */
         .stops-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
         .stop-cell { display: flex; flex-direction: column; align-items: center; gap: 4px; }
         .stop-cell input[type="color"] {
-          width: 48px; height: 48px; border: none; border-radius: 10px;
+          width: 48px; height: 48px; border: 2px solid var(--als-border-strong); border-radius: var(--als-radius-sm);
           padding: 0; cursor: pointer; -webkit-appearance: none; appearance: none;
+          box-shadow: var(--als-shadow-sm);
         }
         .stops-controls { display: flex; gap: 8px; margin-bottom: 16px; }
-        .btn-accent { background: #f4a935; color: #000; }
+        .btn-accent { background: linear-gradient(135deg, #f4a935, #ff7a59); color: #1a1205; box-shadow: 0 4px 16px -2px rgba(244,169,53,.45); }
         .scene-list { display: flex; flex-direction: column; gap: 10px; }
         .scene-row {
           display: flex; align-items: center; gap: 12px;
-          border: 1px solid var(--divider-color, #444); border-radius: 12px; padding: 10px 12px;
+          background: var(--als-surface); border: 1px solid var(--als-border); border-radius: var(--als-radius); padding: 10px 12px;
+          transition: border-color .15s ease, transform .15s ease;
         }
-        .scene-preview { width: 64px; height: 28px; border-radius: 8px; flex: 0 0 auto; }
+        .scene-row:hover { border-color: var(--als-border-strong); }
+        .scene-preview { width: 64px; height: 28px; border-radius: var(--als-radius-sm); flex: 0 0 auto; box-shadow: var(--als-shadow-sm); }
         .scene-name {
-          flex: 1; min-width: 0; font-size: 14px; font-weight: 600;
+          flex: 1; min-width: 0; font-size: 14px; font-weight: 700;
           overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
         }
-        .scene-row .btn { padding: 6px 10px; font-size: 12px; }
+        .scene-row .btn { padding: 6px 12px; font-size: 12px; }
 
         /* --- Vue LightZone ---------------------------------------------- */
         .segment-grid { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
         .segment-cell {
-          width: 42px; height: 42px; border-radius: 8px; border: 1px solid var(--divider-color, #444);
-          background: var(--card-background-color, #1e1e1e); color: var(--primary-text-color, #fff);
-          display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600;
-          cursor: pointer; position: relative; user-select: none;
+          width: 42px; height: 42px; border-radius: var(--als-radius-sm); border: 1px solid var(--als-border-strong);
+          background: var(--als-surface); color: var(--als-text);
+          display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700;
+          cursor: pointer; position: relative; user-select: none; transition: all .15s ease;
         }
-        .segment-cell.selected { border-color: var(--primary-color, #03a9f4); background: rgba(var(--rgb-primary-color,3,169,244),.25); }
+        .segment-cell:hover { border-color: var(--als-accent); }
+        .segment-cell.selected { border-color: var(--als-accent); background: rgba(var(--als-accent-rgb),.25); box-shadow: var(--als-glow); }
         .segment-cell .used-dot {
           position: absolute; top: 3px; right: 3px; width: 8px; height: 8px; border-radius: 50%;
+          box-shadow: 0 0 0 1.5px rgba(0,0,0,.4);
         }
         .zone-list { display: flex; flex-direction: column; gap: 10px; }
         .zone-row {
           display: flex; align-items: center; gap: 12px;
-          border: 1px solid var(--divider-color, #444); border-radius: 12px; padding: 10px 12px;
+          background: var(--als-surface); border: 1px solid var(--als-border); border-radius: var(--als-radius); padding: 10px 12px;
+          transition: border-color .15s ease;
         }
-        .zone-swatch { width: 28px; height: 28px; border-radius: 50%; flex: 0 0 auto; border: 2px solid var(--divider-color, #444); }
+        .zone-row:hover { border-color: var(--als-border-strong); }
+        .zone-swatch { width: 28px; height: 28px; border-radius: 50%; flex: 0 0 auto; border: 2px solid rgba(255,255,255,.2); box-shadow: var(--als-shadow-sm); }
         .zone-info { flex: 1; min-width: 0; }
-        .zone-name { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .zone-segments { font-size: 11px; color: var(--secondary-text-color); }
-        .zone-row .btn { padding: 6px 10px; font-size: 12px; }
+        .zone-name { font-size: 14px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .zone-segments { font-size: 11px; color: var(--als-text-dim); }
+        .zone-row .btn { padding: 6px 12px; font-size: 12px; }
         .strip-picker-row { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
         .strip-picker-row select { flex: 1; min-width: 160px; }
 
@@ -701,9 +827,10 @@ class AlexLightStudioPanel extends HTMLElement {
           .layout { flex-direction: column; height: auto; min-height: calc(100% - 64px); }
           .sidebar {
             width: 100%; flex: none; max-height: 200px;
-            border-right: none; border-bottom: 1px solid var(--divider-color, #333);
+            border-right: none; border-bottom: 1px solid var(--als-border);
           }
           .content { padding: 12px; }
+          .card { padding: 16px; }
           .row { flex-direction: column; align-items: stretch; }
           .row label { flex: none; margin-bottom: 4px; }
           .row > *:not(label) { min-width: 0; }
@@ -721,12 +848,13 @@ class AlexLightStudioPanel extends HTMLElement {
 
         /* --- Generation de scene depuis une image ---------------------- */
         .image-dropzone {
-          border: 2px dashed var(--divider-color, #444); border-radius: 12px;
+          border: 2px dashed var(--als-border-strong); border-radius: var(--als-radius);
           padding: 32px 16px; text-align: center; cursor: pointer;
-          color: var(--secondary-text-color); font-size: 13px;
+          color: var(--als-text-dim); font-size: 13px; transition: all .15s ease;
         }
-        .image-dropzone.dragover { border-color: var(--primary-color, #03a9f4); background: rgba(3,169,244,.08); }
-        .scene-image-canvas-wrap { position: relative; border-radius: 10px; overflow: hidden; }
+        .image-dropzone:hover { border-color: var(--als-accent); background: rgba(var(--als-accent-rgb),.05); }
+        .image-dropzone.dragover { border-color: var(--als-accent); background: rgba(var(--als-accent-rgb),.08); }
+        .scene-image-canvas-wrap { position: relative; border-radius: var(--als-radius); overflow: hidden; box-shadow: var(--als-shadow-sm); }
         #scene-image-canvas { width: 100%; display: block; cursor: crosshair; }
         .scene-image-point-marker {
           position: absolute; width: 24px; height: 24px; margin-left: -12px; margin-top: -12px;
@@ -737,8 +865,12 @@ class AlexLightStudioPanel extends HTMLElement {
         }
         .scene-image-palette-row {
           display: flex; align-items: center; gap: 10px; padding: 6px 8px;
-          border: 1px solid var(--divider-color, #333); border-radius: 8px; margin-bottom: 6px; font-size: 12px;
+          background: var(--als-surface); border: 1px solid var(--als-border); border-radius: var(--als-radius-sm); margin-bottom: 6px; font-size: 12px;
         }
+
+        /* --- Vue 3D --------------------------------------------------- */
+        #threed-wrap { box-shadow: var(--als-shadow-sm); }
+        #wall-toggles-row label { padding-top: 4px; }
       </style>
 
       <div class="header">
@@ -747,12 +879,12 @@ class AlexLightStudioPanel extends HTMLElement {
         </button>
         <h1>Alex Light Studio</h1>
         <div class="actions" style="margin:0 12px;">
-          <button class="btn btn-outline" id="nav-gradient-btn">Gradient</button>
-          <button class="btn btn-outline" id="nav-lightzone-btn">Zones</button>
-          <button class="btn btn-outline" id="nav-room-btn">Pièces</button>
-          <button class="btn btn-outline" id="nav-scene-btn">Scènes</button>
+          <button class="btn btn-outline" id="nav-gradient-btn"><ha-icon class="nav-icon" icon="mdi:gradient-horizontal"></ha-icon>Gradient</button>
+          <button class="btn btn-outline" id="nav-lightzone-btn"><ha-icon class="nav-icon" icon="mdi:led-strip-variant"></ha-icon>Zones</button>
+          <button class="btn btn-outline" id="nav-room-btn"><ha-icon class="nav-icon" icon="mdi:floor-plan"></ha-icon>Pièces</button>
+          <button class="btn btn-outline" id="nav-scene-btn"><ha-icon class="nav-icon" icon="mdi:palette"></ha-icon>Scènes</button>
         </div>
-        <button class="btn btn-outline" id="new-room-btn">+ Nouvelle pièce</button>
+        <button class="btn btn-outline" id="new-room-btn"><ha-icon class="nav-icon" icon="mdi:plus"></ha-icon>Nouvelle pièce</button>
       </div>
 
       <div class="layout">
@@ -837,9 +969,9 @@ class AlexLightStudioPanel extends HTMLElement {
           <div class="card" id="placement-card" style="display:none;margin-top:20px;">
             <h2>Ajouter à la pièce</h2>
             <div class="seg-tabs" id="placement-mode-tabs">
-              <button type="button" class="seg-tab" data-mode="light">Lumière</button>
-              <button type="button" class="seg-tab" data-mode="zone">Zone</button>
-              <button type="button" class="seg-tab" data-mode="furniture">Meuble</button>
+              <button type="button" class="seg-tab" data-mode="light"><ha-icon icon="mdi:lightbulb-on"></ha-icon>Lumière</button>
+              <button type="button" class="seg-tab" data-mode="zone"><ha-icon icon="mdi:map-marker-radius"></ha-icon>Zone</button>
+              <button type="button" class="seg-tab" data-mode="furniture"><ha-icon icon="mdi:sofa"></ha-icon>Meuble</button>
             </div>
 
             <div class="placement-fields" id="fields-light">
@@ -1348,10 +1480,10 @@ class AlexLightStudioPanel extends HTMLElement {
     if (viewScene) viewScene.style.display = view === "scene" ? "block" : "none";
     if (newRoomBtn) newRoomBtn.style.display = view === "room" ? "inline-block" : "none";
     if (roomNameRow) roomNameRow.style.display = view === "room" ? "flex" : "none";
-    if (navGradientBtn) navGradientBtn.style.background = view === "gradient" ? "var(--primary-color, #03a9f4)" : "transparent";
-    if (navLightzoneBtn) navLightzoneBtn.style.background = view === "lightzone" ? "var(--primary-color, #03a9f4)" : "transparent";
-    if (navRoomBtn) navRoomBtn.style.background = view === "room" ? "var(--primary-color, #03a9f4)" : "transparent";
-    if (navSceneBtn) navSceneBtn.style.background = view === "scene" ? "var(--primary-color, #03a9f4)" : "transparent";
+    if (navGradientBtn) navGradientBtn.classList.toggle("nav-active", view === "gradient");
+    if (navLightzoneBtn) navLightzoneBtn.classList.toggle("nav-active", view === "lightzone");
+    if (navRoomBtn) navRoomBtn.classList.toggle("nav-active", view === "room");
+    if (navSceneBtn) navSceneBtn.classList.toggle("nav-active", view === "scene");
     if (sidebarHint) {
       sidebarHint.textContent =
         view === "room" ? "Clique sur une pièce pour l'éditer." : "Clique sur une pièce pour générer une scène dessus.";
@@ -1649,7 +1781,7 @@ class AlexLightStudioPanel extends HTMLElement {
     const list = this.shadowRoot.querySelector("#lights-list");
     if (!list) return;
     if (!this._lights.length) {
-      list.innerHTML = `<div class="empty">Aucune lumière placée pour l'instant.</div>`;
+      list.innerHTML = `<div class="empty"><ha-icon icon="mdi:lightbulb-outline"></ha-icon>Aucune lumière placée pour l'instant.</div>`;
       return;
     }
     list.innerHTML = this._lights
@@ -1662,7 +1794,7 @@ class AlexLightStudioPanel extends HTMLElement {
         const stripRotation = l.strip_rotation || 0;
         return `
           <div class="light-item" data-index="${i}" style="flex-wrap:wrap;">
-            <span>${l.is_strip ? "▬" : MOUNT_TYPE_ICONS[l.mount_type] || ""}</span>
+            <ha-icon icon="${l.is_strip ? "mdi:led-strip-variant" : MOUNT_TYPE_ICONS[l.mount_type] || "mdi:lightbulb"}" style="--mdc-icon-size:18px;color:var(--als-accent);flex:0 0 auto;"></ha-icon>
             <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(name)}</span>
             <span style="color:var(--secondary-text-color);">(${MOUNT_TYPE_LABELS[l.mount_type] || l.mount_type} · ${ROLE_LABELS[derivedRole]})</span>
             <select class="light-type" data-index="${i}" style="flex:0 0 90px;" title="Couleur/Blanc">
@@ -1683,7 +1815,7 @@ class AlexLightStudioPanel extends HTMLElement {
                      value="${stripRotation}" style="width:90px;flex:0 0 90px;" title="Orientation du bandeau (${Math.round(stripRotation)}°)" />`
                 : ""
             }
-            <span class="del-btn" data-del-index="${i}">✕</span>
+            <span class="del-btn" data-del-index="${i}"><ha-icon icon="mdi:close" style="--mdc-icon-size:15px;"></ha-icon></span>
           </div>`;
       })
       .join("");
@@ -1738,7 +1870,7 @@ class AlexLightStudioPanel extends HTMLElement {
     const list = this.shadowRoot.querySelector("#zones-list");
     if (!list) return;
     if (!this._zones.length) {
-      list.innerHTML = `<div class="empty">Aucune zone placée pour l'instant.</div>`;
+      list.innerHTML = `<div class="empty"><ha-icon icon="mdi:map-marker-radius-outline"></ha-icon>Aucune zone placée pour l'instant.</div>`;
       return;
     }
     list.innerHTML = this._zones
@@ -1751,7 +1883,7 @@ class AlexLightStudioPanel extends HTMLElement {
             <span style="color:var(--secondary-text-color);">portée ${Math.round(z.influence_radius)}</span>
             <input type="number" class="zone-height" data-index="${i}" min="0" max="6" step="0.1"
                    value="${z.z != null ? z.z : 1.2}" style="width:56px;flex:0 0 56px;" title="Hauteur (m)" />
-            <span class="del-btn" data-del-zone-index="${i}">✕</span>
+            <span class="del-btn" data-del-zone-index="${i}"><ha-icon icon="mdi:close" style="--mdc-icon-size:15px;"></ha-icon></span>
           </div>`;
       })
       .join("");
@@ -1859,7 +1991,7 @@ class AlexLightStudioPanel extends HTMLElement {
     const list = this.shadowRoot.querySelector("#furniture-list");
     if (!list) return;
     if (!this._furniture.length) {
-      list.innerHTML = `<div class="empty">Aucun meuble placé pour l'instant.</div>`;
+      list.innerHTML = `<div class="empty"><ha-icon icon="mdi:sofa-outline"></ha-icon>Aucun meuble placé pour l'instant.</div>`;
       return;
     }
     list.innerHTML = this._furniture
@@ -1869,13 +2001,15 @@ class AlexLightStudioPanel extends HTMLElement {
         const elevation = f.elevation || 0;
         return `
           <div class="light-item" data-index="${i}" style="flex-wrap:wrap;">
-            <span style="width:14px;height:14px;border-radius:3px;background:${catalog.color};flex:0 0 14px;"></span>
+            <span style="display:flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:7px;background:${catalog.color};flex:0 0 26px;">
+              <ha-icon icon="${catalog.icon || "mdi:cube-outline"}" style="--mdc-icon-size:16px;color:white;"></ha-icon>
+            </span>
             <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(catalog.label)}</span>
             <input type="range" class="furniture-rotation" data-index="${i}" min="0" max="359" step="5"
                    value="${rotation}" style="width:90px;flex:0 0 90px;" title="Rotation (${Math.round(rotation)}°)" />
             <input type="number" class="furniture-elevation" data-index="${i}" min="0" max="3" step="0.05"
                    value="${elevation}" style="width:56px;flex:0 0 56px;" title="Élévation (m)" />
-            <span class="del-btn" data-del-furniture-index="${i}">✕</span>
+            <span class="del-btn" data-del-furniture-index="${i}"><ha-icon icon="mdi:close" style="--mdc-icon-size:15px;"></ha-icon></span>
           </div>`;
       })
       .join("");
@@ -2413,7 +2547,7 @@ class AlexLightStudioPanel extends HTMLElement {
       return;
     }
     if (!this._rooms.length) {
-      list.innerHTML = `<div class="empty">Aucune pièce enregistrée.</div>`;
+      list.innerHTML = `<div class="empty"><ha-icon icon="mdi:floor-plan"></ha-icon>Aucune pièce enregistrée.</div>`;
       return;
     }
     list.innerHTML = this._rooms
@@ -2421,7 +2555,7 @@ class AlexLightStudioPanel extends HTMLElement {
         (r) => `
           <div class="room-row ${r.id === this._editingRoomId ? "selected" : ""}" data-room-id="${escapeHtml(r.id)}">
             <span>${escapeHtml(r.name)}</span>
-            <span class="del-btn" data-del-room="${escapeHtml(r.id)}">✕</span>
+            <span class="del-btn" data-del-room="${escapeHtml(r.id)}"><ha-icon icon="mdi:close" style="--mdc-icon-size:15px;"></ha-icon></span>
           </div>`
       )
       .join("");
@@ -2970,7 +3104,7 @@ class AlexLightStudioPanel extends HTMLElement {
     if (!list) return;
     const names = Object.keys(scenes);
     if (names.length === 0) {
-      list.innerHTML = `<div class="empty">Aucune scène enregistrée pour l'instant.</div>`;
+      list.innerHTML = `<div class="empty"><ha-icon icon="mdi:palette-outline"></ha-icon>Aucune scène enregistrée pour l'instant.</div>`;
       return;
     }
     list.innerHTML = names
@@ -3581,7 +3715,7 @@ class AlexLightStudioPanel extends HTMLElement {
           <div class="scene-image-palette-row">
             <span style="width:20px;height:20px;border-radius:5px;background:${css};flex:0 0 20px;"></span>
             <span style="flex:1;">Point ${i + 1} — teinte ${Math.round(p.hue)}°, saturation ${Math.round(p.saturation)}%</span>
-            <span class="scene-image-del-point" data-index="${i}" style="cursor:pointer;opacity:.7;">✕</span>
+            <span class="scene-image-del-point" data-index="${i}" style="cursor:pointer;opacity:.7;"><ha-icon icon="mdi:close" style="--mdc-icon-size:15px;"></ha-icon></span>
           </div>`;
       })
       .join("");
