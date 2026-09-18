@@ -762,6 +762,17 @@ class AlexLightStudioPanel extends HTMLElement {
               <button class="btn btn-outline" id="reset-outline-btn">Recommencer le contour</button>
               <button class="btn btn-primary" id="validate-outline-btn" style="display:none;">Passer à la vue 3D</button>
             </div>
+            <div id="rect-generator" style="margin-top:16px;padding-top:14px;border-top:1px solid var(--divider-color,#333);">
+              <div class="hint" style="margin:0 0 8px;">Ou indique directement les dimensions d'une pièce carrée/rectangulaire :</div>
+              <div class="row">
+                <label>Dimensions (m)</label>
+                <input type="number" id="rect-width-input" min="0.3" max="30" step="0.05" placeholder="Largeur, ex. 3.15" />
+                <input type="number" id="rect-depth-input" min="0.3" max="30" step="0.05" placeholder="Profondeur, ex. 4.0" />
+              </div>
+              <div class="actions">
+                <button class="btn btn-outline" id="generate-rect-btn">Générer le rectangle</button>
+              </div>
+            </div>
           </div>
 
           <div class="card" id="view3d-card" style="display:none;margin-top:20px;">
@@ -1102,6 +1113,7 @@ class AlexLightStudioPanel extends HTMLElement {
       this._renderFurnitureList();
       this._renderScenePreviewList();
     });
+    this.shadowRoot.querySelector("#generate-rect-btn").addEventListener("click", () => this._generateRectangleOutline());
     this.shadowRoot.querySelector("#entity-select").addEventListener("change", (ev) => {
       this._pendingEntity = ev.target.value;
       // Pre-remplissage indicatif a partir des capacites live de
@@ -1418,6 +1430,55 @@ class AlexLightStudioPanel extends HTMLElement {
     this._renderCanvas();
   }
 
+  // Alternative au trace au clic : pour une piece carree/rectangulaire,
+  // saisir directement ses dimensions reelles genere le contour (et ferme
+  // le trace) sans avoir a cliquer les 4 coins. Remplace entierement le
+  // contour courant (et, comme "Recommencer le contour", les lumieres/
+  // zones/meubles deja places -- ils n'auraient plus de sens sur une
+  // nouvelle forme).
+  _generateRectangleOutline() {
+    const widthInput = this.shadowRoot.querySelector("#rect-width-input");
+    const depthInput = this.shadowRoot.querySelector("#rect-depth-input");
+    const widthM = parseFloat(widthInput.value);
+    const depthM = parseFloat(depthInput.value);
+    if (!Number.isFinite(widthM) || !Number.isFinite(depthM) || widthM <= 0 || depthM <= 0) {
+      alert("Indique une largeur et une profondeur valides (en mètres, ex. 3.15).");
+      return;
+    }
+
+    // La piece garde le pas par defaut (80 px/m, memes proportions que le
+    // reste du panel) sauf si elle deborderait trop du plan 2D visible
+    // (viewBox ${VIEWBOX_W}x${VIEWBOX_H}) -- dans ce cas seul le pas
+    // pixels/metre de CETTE piece est reduit (Room.scale_px_per_m), la
+    // taille reelle en metres ne change pas : ca ne fait que redessiner le
+    // plan 2D plus petit pour qu'il reste entierement visible/cliquable.
+    const maxScaleForWidth = (VIEWBOX_W * 0.85) / widthM;
+    const maxScaleForDepth = (VIEWBOX_H * 0.85) / depthM;
+    this._scalePxPerM = Math.min(DEFAULT_PX_PER_METER, maxScaleForWidth, maxScaleForDepth);
+
+    const widthPx = Math.round(widthM * this._scalePxPerM);
+    const depthPx = Math.round(depthM * this._scalePxPerM);
+    this._points = [
+      { x: 0, y: 0 },
+      { x: widthPx, y: 0 },
+      { x: widthPx, y: depthPx },
+      { x: 0, y: depthPx },
+    ];
+    this._closed = true;
+    this._editingOutline = false;
+    this._lights = [];
+    this._zones = [];
+    this._furniture = [];
+    this._suggestions = null;
+    this._previewMode = false;
+    this._syncEditorInputs();
+    this._renderCanvas();
+    this._renderLightsList();
+    this._renderZonesList();
+    this._renderFurnitureList();
+    this._renderScenePreviewList();
+  }
+
   // -----------------------------------------------------------------------
   // Glisser-depose des points de mur (seuls elements encore edites dans le
   // plan 2D -- lumieres/zones/meubles se glissent desormais dans la vue 3D).
@@ -1476,8 +1537,10 @@ class AlexLightStudioPanel extends HTMLElement {
     const canvasWrap = this.shadowRoot.querySelector("#canvas-wrap");
     const validateOutlineBtn = this.shadowRoot.querySelector("#validate-outline-btn");
     const drawHint = this.shadowRoot.querySelector("#draw-hint");
+    const rectGenerator = this.shadowRoot.querySelector("#rect-generator");
     if (canvasWrap) canvasWrap.style.display = showOutline2D ? "block" : "none";
     if (outlineActions) outlineActions.style.display = showOutline2D ? "flex" : "none";
+    if (rectGenerator) rectGenerator.style.display = showOutline2D ? "block" : "none";
     if (validateOutlineBtn) validateOutlineBtn.style.display = this._closed && this._editingOutline ? "inline-block" : "none";
     if (drawHint) {
       drawHint.style.display = showOutline2D ? "block" : "none";
