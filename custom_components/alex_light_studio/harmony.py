@@ -167,6 +167,14 @@ ROLE_KELVIN_OFFSET = {"primary": 0, "accent": -150, "ambient": -300}
 
 INDIRECT_SATURATION_FACTOR = 0.65
 
+# Poids total maximal que TOUTES les zones combinees (manuelles + deduites
+# du mobilier) peuvent peser face a la base positionnelle (qui compte pour
+# un poids fixe de 1) -- voir _blend_zone_influence. 1.5 laisse une seule
+# zone tres proche dominer nettement (poids jusqu'a 1.0, comme prevu a
+# l'origine) tout en empechant plusieurs zones qui se recouvrent de noyer
+# completement la variation de teinte/luminosite entre lumieres.
+MAX_TOTAL_ZONE_WEIGHT = 1.5
+
 # Role fonctionnel PONDERE (pas rigide, section 10 du document : "une
 # lumiere peut etre 70% ambient et 30% accent") selon la position physique
 # et la direction -- remplace l'ancienne table a une seule categorie par
@@ -330,17 +338,20 @@ class LightInput:
 # Regles de zone automatique par type de meuble (vue 3D) -- uniquement les
 # types dont la fonction justifie une influence chromatique automatique
 # (section "meubles -> harmonie" validee avec l'utilisateur) : un type
-# absent de cette table ne genere aucune zone. "radius_factor" se multiplie
-# par la plus grande dimension horizontale du meuble (largeur/profondeur) ;
-# "z_factor" se multiplie par la hauteur du meuble et s'ajoute a son
-# elevation pour placer l'ancrage a une hauteur plausible (assise pour un
-# canape, centre d'ecran pour une TV).
+# absent de cette table ne genere aucune zone. "radius_factor"/"radius_base"
+# donnent un rayon PRES du meuble (radius_base + radius_factor * plus grande
+# dimension horizontale), pas une fraction de la piece entiere -- une valeur
+# trop genereuse ici a deja cause un vrai bug (v1) : dans une piece de taille
+# normale, un canape/une TV couvrait la piece entiere, tirant TOUTES les
+# lumieres vers la meme teinte. "z_factor" se multiplie par la hauteur du
+# meuble et s'ajoute a son elevation pour placer l'ancrage a une hauteur
+# plausible (assise pour un canape, centre d'ecran pour une TV).
 _FURNITURE_ZONE_RULES = {
-    "sofa": {"hue": 30.0, "saturation": 50.0, "radius_factor": 1.8, "brightness_bias": 1.0, "z_factor": 0.6},
-    "armchair": {"hue": 30.0, "saturation": 50.0, "radius_factor": 1.8, "brightness_bias": 1.0, "z_factor": 0.6},
-    "bed": {"hue": 30.0, "saturation": 50.0, "radius_factor": 1.8, "brightness_bias": 1.0, "z_factor": 0.6},
-    "tv": {"hue": 215.0, "saturation": 20.0, "radius_factor": 2.2, "brightness_bias": 0.55, "z_factor": 0.5},
-    "monitor": {"hue": 215.0, "saturation": 20.0, "radius_factor": 2.2, "brightness_bias": 0.55, "z_factor": 0.5},
+    "sofa": {"hue": 30.0, "saturation": 50.0, "radius_base": 0.4, "radius_factor": 0.6, "brightness_bias": 1.0, "z_factor": 0.6},
+    "armchair": {"hue": 30.0, "saturation": 50.0, "radius_base": 0.4, "radius_factor": 0.6, "brightness_bias": 1.0, "z_factor": 0.6},
+    "bed": {"hue": 30.0, "saturation": 50.0, "radius_base": 0.4, "radius_factor": 0.6, "brightness_bias": 1.0, "z_factor": 0.6},
+    "tv": {"hue": 215.0, "saturation": 20.0, "radius_base": 0.5, "radius_factor": 0.7, "brightness_bias": 0.7, "z_factor": 0.5},
+    "monitor": {"hue": 215.0, "saturation": 20.0, "radius_base": 0.5, "radius_factor": 0.7, "brightness_bias": 0.7, "z_factor": 0.5},
 }
 
 
@@ -353,7 +364,7 @@ def furniture_to_zone_inputs(furniture: list[FurnitureInput]) -> list[ZoneInput]
         rule = _FURNITURE_ZONE_RULES.get(item.furniture_type)
         if rule is None:
             continue
-        radius = max(item.width, item.depth) * rule["radius_factor"]
+        radius = rule["radius_base"] + max(item.width, item.depth) * rule["radius_factor"]
         zones.append(
             ZoneInput(
                 name=f"auto:{item.furniture_type}",
@@ -590,15 +601,34 @@ def _blend_zone_influence(
     de 1 ; chaque zone contribue selon un falloff lineaire par distance
     **3D reelle** (x, y, hauteur -- desormais toutes en metres, voir
     PX_PER_METER cote panel) (section 7.1). Sans zone proche, renvoie la
-    base inchangee et un biais de luminosite neutre (1.0)."""
-    contributions = [(base_hue, base_sat, 1.0)]
-    brightness_contributions = [(1.0, 1.0)]  # (biais, poids) -- 1.0 = neutre par defaut
+    base inchangee et un biais de luminosite neutre (1.0).
+
+    Le poids TOTAL de toutes les zones combinees est plafonne a
+    MAX_TOTAL_ZONE_WEIGHT (poids individuels reduits proportionnellement au
+    besoin, en conservant leurs proportions relatives) -- sans ce
+    plafond, plusieurs zones qui se recouvrent (frequent avec les zones
+    automatiques du mobilier : canape + TV dans un salon, par exemple)
+    additionnaient librement leurs poids et pouvaient totalement noyer la
+    base positionnelle (bug reel observe : toutes les lumieres convergeaient
+    vers quasiment la meme teinte, et une zone ecran suffisait a elle seule
+    a assombrir toute la piece bien plus que prevu une fois cumulee avec
+    l'intensite/le contraste de l'ambiance choisie)."""
+    raw_zone_weights = []
     for zone in zones:
         d = math.dist((light_x, light_y, light_z), (zone.x, zone.y, zone.z))
         w = _linear_falloff(d, zone.influence_radius)
         if w > 0:
-            contributions.append((zone.hue, zone.saturation, w))
-            brightness_contributions.append((zone.brightness_bias, w))
+            raw_zone_weights.append((zone, w))
+
+    total_raw_weight = sum(w for _, w in raw_zone_weights)
+    scale = MAX_TOTAL_ZONE_WEIGHT / total_raw_weight if total_raw_weight > MAX_TOTAL_ZONE_WEIGHT else 1.0
+
+    contributions = [(base_hue, base_sat, 1.0)]
+    brightness_contributions = [(1.0, 1.0)]  # (biais, poids) -- 1.0 = neutre par defaut
+    for zone, w in raw_zone_weights:
+        scaled_w = w * scale
+        contributions.append((zone.hue, zone.saturation, scaled_w))
+        brightness_contributions.append((zone.brightness_bias, scaled_w))
 
     total_bri_weight = sum(w for _, w in brightness_contributions)
     brightness_bias = sum(b * w for b, w in brightness_contributions) / total_bri_weight
