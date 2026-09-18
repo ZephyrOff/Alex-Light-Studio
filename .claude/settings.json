@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -sI https://unpkg.com/three@0.128.0/build/three.min.js)",
+      "Bash(curl -sI https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js)"
+    ]
+  }
+}

@@ -50,3 +50,27 @@ MOUNT_TYPES = ("ceiling", "wall", "desk")
 # sur une surface (corniche, uplighter...) -- avec mount_type, determine le
 # role fonctionnel (harmony.derive_role) et influence la saturation calculee.
 DIRECTION_TYPES = ("direct", "indirect")
+
+# Catalogue des meubles placables dans la vue 3D de la piece -- dimensions
+# par defaut en metres (largeur/profondeur/hauteur), pre-remplissent le
+# formulaire de placement et dimensionnent la primitive 3D (boite), mais
+# restent editables ensuite. La categorie determine si le meuble genere une
+# zone d'influence chromatique automatique (harmony.furniture_to_zone_inputs) :
+# "cozy" (canape/fauteuil/lit) -> ambiance chaude a proximite, "screen"
+# (tv/moniteur) -> lumiere tamisee/plus froide pour limiter l'eblouissement,
+# "neutral" -> aucune influence automatique.
+FURNITURE_TYPES = {
+    "sofa": {"width": 1.8, "depth": 0.85, "height": 0.8, "category": "cozy", "color": "#6d4c41"},
+    "armchair": {"width": 0.8, "depth": 0.8, "height": 0.85, "category": "cozy", "color": "#795548"},
+    "bed": {"width": 1.6, "depth": 2.0, "height": 0.55, "category": "cozy", "color": "#8d6e63"},
+    "tv": {"width": 1.1, "depth": 0.08, "height": 0.65, "category": "screen", "color": "#212121"},
+    "monitor": {"width": 0.6, "depth": 0.2, "height": 0.4, "category": "screen", "color": "#212121"},
+    "table": {"width": 1.2, "depth": 0.8, "height": 0.75, "category": "neutral", "color": "#a1887f"},
+    "desk": {"width": 1.2, "depth": 0.6, "height": 0.75, "category": "neutral", "color": "#a1887f"},
+    "bookshelf": {"width": 0.9, "depth": 0.3, "height": 1.8, "category": "neutral", "color": "#6d4c41"},
+    "plant": {"width": 0.4, "depth": 0.4, "height": 1.2, "category": "neutral", "color": "#2e7d32"},
+    "other": {"width": 0.6, "depth": 0.6, "height": 0.8, "category": "neutral", "color": "#616161"},
+}
+
+DEFAULT_ROOM_HEIGHT = 2.5  # metres sous plafond
+DEFAULT_SCALE_PX_PER_M = 80.0  # conversion pixels (plan 2D) <-> metres (vue 3D / harmony)

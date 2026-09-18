@@ -287,6 +287,27 @@ class ZoneInput:
     hue: float
     saturation: float = 70.0
     influence_radius: float = 150.0  # unites du plan (meme espace que les positions des lumieres)
+    z: float = 1.2  # hauteur de l'ancrage (metres) -- ex. une zone "ecran" a hauteur d'ecran, pas au sol
+    # Multiplicateur de luminosite pour les lumieres proches (1.0 = neutre,
+    # <1 assombrit -- ex. anti-eblouissement pres d'une TV/d'un moniteur).
+    # Melange par distance comme la teinte/saturation, voir _blend_zone_influence.
+    brightness_bias: float = 1.0
+
+
+@dataclass
+class FurnitureInput:
+    """Un meuble positionne dans la piece (vue 3D) -- sert de contexte
+    spatial et, pour certains types, genere automatiquement une ZoneInput
+    (voir furniture_to_zone_inputs) qui influence l'harmonie EN PLUS des
+    zones placees manuellement par l'utilisateur, jamais a leur place."""
+
+    furniture_type: str
+    x: float
+    y: float
+    elevation: float = 0.0  # hauteur du bas du meuble au-dessus du sol (metres) -- ex. TV murale
+    width: float = 0.6
+    depth: float = 0.6
+    height: float = 0.8
 
 
 @dataclass
@@ -304,6 +325,48 @@ class LightInput:
     power: float = 1.0  # puissance/capacite relative (section 9.1) -- 1.0 = reference
     supports_color: bool = True
     supports_color_temp: bool = False
+
+
+# Regles de zone automatique par type de meuble (vue 3D) -- uniquement les
+# types dont la fonction justifie une influence chromatique automatique
+# (section "meubles -> harmonie" validee avec l'utilisateur) : un type
+# absent de cette table ne genere aucune zone. "radius_factor" se multiplie
+# par la plus grande dimension horizontale du meuble (largeur/profondeur) ;
+# "z_factor" se multiplie par la hauteur du meuble et s'ajoute a son
+# elevation pour placer l'ancrage a une hauteur plausible (assise pour un
+# canape, centre d'ecran pour une TV).
+_FURNITURE_ZONE_RULES = {
+    "sofa": {"hue": 30.0, "saturation": 50.0, "radius_factor": 1.8, "brightness_bias": 1.0, "z_factor": 0.6},
+    "armchair": {"hue": 30.0, "saturation": 50.0, "radius_factor": 1.8, "brightness_bias": 1.0, "z_factor": 0.6},
+    "bed": {"hue": 30.0, "saturation": 50.0, "radius_factor": 1.8, "brightness_bias": 1.0, "z_factor": 0.6},
+    "tv": {"hue": 215.0, "saturation": 20.0, "radius_factor": 2.2, "brightness_bias": 0.55, "z_factor": 0.5},
+    "monitor": {"hue": 215.0, "saturation": 20.0, "radius_factor": 2.2, "brightness_bias": 0.55, "z_factor": 0.5},
+}
+
+
+def furniture_to_zone_inputs(furniture: list[FurnitureInput]) -> list[ZoneInput]:
+    """Deduit des zones d'influence chromatique automatiques du mobilier --
+    voir _FURNITURE_ZONE_RULES. Les meubles d'un type absent de la table
+    (table, bureau, etagere, plante...) ne produisent aucune zone."""
+    zones: list[ZoneInput] = []
+    for item in furniture:
+        rule = _FURNITURE_ZONE_RULES.get(item.furniture_type)
+        if rule is None:
+            continue
+        radius = max(item.width, item.depth) * rule["radius_factor"]
+        zones.append(
+            ZoneInput(
+                name=f"auto:{item.furniture_type}",
+                x=item.x,
+                y=item.y,
+                z=item.elevation + item.height * rule["z_factor"],
+                hue=rule["hue"],
+                saturation=rule["saturation"],
+                influence_radius=radius,
+                brightness_bias=rule["brightness_bias"],
+            )
+        )
+    return zones
 
 
 @dataclass
@@ -326,6 +389,7 @@ def compute_scene(
     white_temperature: float | None = None,
     role_multiplier: dict[str, float] | None = None,
     zones: list[ZoneInput] | None = None,
+    furniture: list[FurnitureInput] | None = None,
     generation_style: str = "normal",
     image_palette: list[tuple[float, float]] | None = None,
     rng: random.Random | None = None,
@@ -333,8 +397,11 @@ def compute_scene(
     """Calcule une proposition pour chaque lumiere, en combinant :
       1. Un degrade de base selon la hauteur (herite de la version
          precedente, sert de "toile de fond" chromatique).
-      2. L'influence des zones proches (section 6-7 du document),
-         melangee en espace perceptuel OKLCH.
+      2. L'influence des zones proches (section 6-7 du document, distance
+         3D reelle en metres), melangee en espace perceptuel OKLCH --
+         zones manuelles ET zones automatiques deduites du mobilier
+         (furniture_to_zone_inputs), ces dernieres en PLUS des premieres,
+         jamais a leur place.
       3. Un role PONDERE (pas rigide) qui determine saturation/luminosite.
       4. La puissance relative de la lumiere (section 9.1).
 
@@ -346,7 +413,7 @@ def compute_scene(
     reinterpreter. Prioritaire sur mood/base_hue si fournie.
     """
     rng = rng or random.Random()
-    zones = zones or []
+    all_zones = list(zones or []) + furniture_to_zone_inputs(furniture or [])
     hue_slots: list[float] | None = None
 
     if image_palette:
@@ -433,13 +500,16 @@ def compute_scene(
         )
         base_sat_val = sum(w * ROLE_BASE_SATURATION[r] for r, w in role_weights.items()) * (resolved_sat / 60.0)
 
-        hue, sat = _blend_hue_sat_with_zones(base_hue_val, base_sat_val, light.x, light.y, zones)
+        hue, sat, zone_brightness_bias = _blend_zone_influence(
+            base_hue_val, base_sat_val, light.x, light.y, light.height, all_zones
+        )
 
         # --- Luminosite : moyenne ponderee sur la distribution de roles ---
         bri = sum(
             w * _role_brightness(r, resolved_contrast, resolved_intensity) * resolved_role_mult.get(r, 1.0)
             for r, w in role_weights.items()
         )
+        bri *= zone_brightness_bias
 
         # Variation par hauteur (+/-15%) : sans ca, plusieurs lumieres
         # partageant le meme role (meme montage+direction) et les memes
@@ -504,24 +574,37 @@ def _saturation_brightness_tradeoff(saturation: float, brightness: float) -> flo
     return brightness * factor
 
 
-def _blend_hue_sat_with_zones(
-    base_hue: float, base_sat: float, light_x: float, light_y: float, zones: list[ZoneInput]
-) -> tuple[float, float]:
-    """Combine la teinte/saturation de base avec l'influence des zones
-    proches, en espace perceptuel OKLCH (section 4.5/4.6 du document) --
+def _blend_zone_influence(
+    base_hue: float,
+    base_sat: float,
+    light_x: float,
+    light_y: float,
+    light_z: float,
+    zones: list[ZoneInput],
+) -> tuple[float, float, float]:
+    """Combine la teinte/saturation/luminosite de base avec l'influence des
+    zones proches (manuelles + automatiques deduites du mobilier), en
+    espace perceptuel OKLCH pour la couleur (section 4.5/4.6 du document) --
     une simple moyenne RGB/HSV produirait des couleurs "sales" des que
     plusieurs contributions se melangent. La base compte pour un poids fixe
     de 1 ; chaque zone contribue selon un falloff lineaire par distance
-    (section 7.1). Sans zone proche, renvoie la base inchangee."""
+    **3D reelle** (x, y, hauteur -- desormais toutes en metres, voir
+    PX_PER_METER cote panel) (section 7.1). Sans zone proche, renvoie la
+    base inchangee et un biais de luminosite neutre (1.0)."""
     contributions = [(base_hue, base_sat, 1.0)]
+    brightness_contributions = [(1.0, 1.0)]  # (biais, poids) -- 1.0 = neutre par defaut
     for zone in zones:
-        d = math.hypot(light_x - zone.x, light_y - zone.y)
+        d = math.dist((light_x, light_y, light_z), (zone.x, zone.y, zone.z))
         w = _linear_falloff(d, zone.influence_radius)
         if w > 0:
             contributions.append((zone.hue, zone.saturation, w))
+            brightness_contributions.append((zone.brightness_bias, w))
+
+    total_bri_weight = sum(w for _, w in brightness_contributions)
+    brightness_bias = sum(b * w for b, w in brightness_contributions) / total_bri_weight
 
     if len(contributions) == 1:
-        return base_hue, base_sat
+        return base_hue, base_sat, brightness_bias
 
     oklch_points = []
     for hue, sat, weight in contributions:
@@ -536,4 +619,4 @@ def _blend_hue_sat_with_zones(
 
     r, g, b = _oklch_to_rgb(l_mix, c_mix, h_mix)
     final_hue, final_sat, _ = _rgb_to_hsv(r, g, b)
-    return final_hue, final_sat
+    return final_hue, final_sat, brightness_bias

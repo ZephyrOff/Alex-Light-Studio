@@ -51,10 +51,13 @@ from homeassistant.util import slugify
 
 from . import harmony
 from .const import (
+    DEFAULT_ROOM_HEIGHT,
+    DEFAULT_SCALE_PX_PER_M,
     DEFAULT_SEGMENTS,
     DEVICE_TYPE_AQARA,
     DIRECTION_TYPES,
     DOMAIN,
+    FURNITURE_TYPES,
     MAX_SEGMENTS,
     MOUNT_TYPES,
     PANEL_ICON,
@@ -106,6 +109,27 @@ class Zone:
     hue: float
     saturation: float = 70.0
     influence_radius: float = 150.0
+    z: float = 1.2  # hauteur de l'ancrage (metres) -- voir harmony.ZoneInput
+    brightness_bias: float = 1.0
+
+
+@dataclass
+class Furniture:
+    """Un meuble positionne dans la vue 3D -- contexte spatial pour placer
+    lumieres/zones, et pour certains types (voir const.FURNITURE_TYPES),
+    source d'une zone d'influence chromatique automatique (harmony.
+    furniture_to_zone_inputs)."""
+
+    id: str
+    furniture_type: str
+    x: float
+    y: float
+    rotation: float = 0.0  # degres, autour de l'axe vertical
+    elevation: float = 0.0  # hauteur du bas du meuble au-dessus du sol (metres)
+    width: float = 0.6
+    depth: float = 0.6
+    height: float = 0.8
+    label: str = ""
 
 
 @dataclass
@@ -115,6 +139,9 @@ class Room:
     points: list[dict]  # [{"x": .., "y": ..}, ...] -- contour polygonal, ordre = trace
     lights: list[dict] = field(default_factory=list)  # liste de LightPosition serialisees
     zones: list[dict] = field(default_factory=list)  # liste de Zone serialisees
+    height: float = DEFAULT_ROOM_HEIGHT  # hauteur sous plafond (metres), vue 3D
+    scale_px_per_m: float = DEFAULT_SCALE_PX_PER_M  # conversion points/x/y (pixels) <-> metres
+    furniture: list[dict] = field(default_factory=list)  # liste de Furniture serialisees
 
 
 POINT_SCHEMA = {vol.Required("x"): vol.Coerce(float), vol.Required("y"): vol.Coerce(float)}
@@ -145,6 +172,21 @@ ZONE_SCHEMA = {
     vol.Required("hue"): vol.Coerce(float),
     vol.Optional("saturation", default=70.0): vol.Coerce(float),
     vol.Optional("influence_radius", default=150.0): vol.Coerce(float),
+    vol.Optional("z", default=1.2): vol.Coerce(float),
+    vol.Optional("brightness_bias", default=1.0): vol.All(vol.Coerce(float), vol.Range(min=0, max=2)),
+}
+
+FURNITURE_SCHEMA = {
+    vol.Required("id"): str,
+    vol.Required("furniture_type"): vol.In(FURNITURE_TYPES),
+    vol.Required("x"): vol.Coerce(float),
+    vol.Required("y"): vol.Coerce(float),
+    vol.Optional("rotation", default=0.0): vol.Coerce(float),
+    vol.Optional("elevation", default=0.0): vol.Coerce(float),
+    vol.Optional("width"): vol.Coerce(float),
+    vol.Optional("depth"): vol.Coerce(float),
+    vol.Optional("height"): vol.Coerce(float),
+    vol.Optional("label", default=""): str,
 }
 
 SAVE_ROOM_SCHEMA = {
@@ -154,6 +196,9 @@ SAVE_ROOM_SCHEMA = {
     vol.Required("points"): [POINT_SCHEMA],
     vol.Optional("lights", default=list): [LIGHT_SCHEMA],
     vol.Optional("zones", default=list): [ZONE_SCHEMA],
+    vol.Optional("height", default=DEFAULT_ROOM_HEIGHT): vol.Coerce(float),
+    vol.Optional("scale_px_per_m", default=DEFAULT_SCALE_PX_PER_M): vol.Coerce(float),
+    vol.Optional("furniture", default=list): [FURNITURE_SCHEMA],
 }
 
 DELETE_ROOM_SCHEMA = {vol.Required("type"): f"{DOMAIN}/delete_room", vol.Required("room_id"): str}
@@ -164,6 +209,7 @@ COMPUTE_SCENE_SCHEMA = {
     vol.Required("type"): f"{DOMAIN}/compute_scene",
     vol.Required("lights"): [LIGHT_SCHEMA],
     vol.Optional("zones", default=list): [ZONE_SCHEMA],
+    vol.Optional("furniture", default=list): [FURNITURE_SCHEMA],
     vol.Required("scheme"): vol.In(["complementary", "analogous", "triadic"]),
     vol.Optional("mood"): vol.In(list(harmony.MOOD_PRESETS)),
     vol.Optional("base_hue"): vol.Coerce(float),
@@ -593,6 +639,19 @@ async def _async_sync_strip_brightness(
             entity.sync_brightness(brightness)
 
 
+def _furniture_with_defaults(f: dict) -> dict:
+    """Comble largeur/profondeur/hauteur manquantes avec les valeurs du
+    catalogue const.FURNITURE_TYPES pour le type demande -- l'utilisateur
+    peut les remplacer, mais n'a pas a les ressaisir a chaque placement."""
+    catalog = FURNITURE_TYPES[f["furniture_type"]]
+    return {
+        **f,
+        "width": f.get("width") or catalog["width"],
+        "depth": f.get("depth") or catalog["depth"],
+        "height": f.get("height") or catalog["height"],
+    }
+
+
 @websocket_api.websocket_command(GET_ROOMS_SCHEMA)
 @websocket_api.async_response
 async def websocket_get_rooms(hass: HomeAssistant, connection, msg) -> None:
@@ -612,6 +671,9 @@ async def websocket_save_room(hass: HomeAssistant, connection, msg) -> None:
         points=msg["points"],
         lights=msg.get("lights", []),
         zones=msg.get("zones", []),
+        height=msg.get("height", DEFAULT_ROOM_HEIGHT),
+        scale_px_per_m=msg.get("scale_px_per_m", DEFAULT_SCALE_PX_PER_M),
+        furniture=[_furniture_with_defaults(f) for f in msg.get("furniture", [])],
     )
     rooms[room_id] = asdict(room)
     await _async_persist_rooms(hass)
@@ -659,9 +721,26 @@ async def websocket_compute_scene(hass: HomeAssistant, connection, msg) -> None:
             hue=z["hue"],
             saturation=z.get("saturation", 70.0),
             influence_radius=z.get("influence_radius", 150.0),
+            z=z.get("z", 1.2),
+            brightness_bias=z.get("brightness_bias", 1.0),
         )
         for z in msg.get("zones", [])
     ]
+
+    furniture_inputs = []
+    for f in msg.get("furniture", []):
+        f = _furniture_with_defaults(f)
+        furniture_inputs.append(
+            harmony.FurnitureInput(
+                furniture_type=f["furniture_type"],
+                x=f["x"],
+                y=f["y"],
+                elevation=f.get("elevation", 0.0),
+                width=f["width"],
+                depth=f["depth"],
+                height=f["height"],
+            )
+        )
 
     image_palette_raw = msg.get("image_palette")
     image_palette = [(p[0], p[1]) for p in image_palette_raw] if image_palette_raw else None
@@ -679,6 +758,7 @@ async def websocket_compute_scene(hass: HomeAssistant, connection, msg) -> None:
             generation_style=msg.get("generation_style", "normal"),
             image_palette=image_palette,
             zones=zone_inputs,
+            furniture=furniture_inputs,
             rng=random.Random(),
         )
     except ValueError as exc:

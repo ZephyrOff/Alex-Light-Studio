@@ -9,8 +9,12 @@ et deux cartes Lovelace compagnes servies directement par l'intégration
   LED à segments (Philips Hue Gradient / Aqara LED Strip T1, via
   Zigbee2MQTT), test en direct, et bibliothèque de scènes de dégradé
   réutilisables entre appareils différents (nombre de segments quelconque).
-- **Pièces** (ex-Alex Scene Studio) — dessine le contour d'une pièce,
-  positionne des lumières et des zones à influence chromatique.
+- **Pièces** (ex-Alex Scene Studio) — dessine le contour d'une pièce en vue
+  de dessus, puis visualise-la en volume dans une vraie **vue 3D** (Three.js,
+  vendu localement) pour y positionner lumières, zones à influence
+  chromatique et **meubles** (canapé, lit, table, TV, moniteur PC...),
+  utile pour comprendre le contexte réel de la pièce avant de placer une
+  lumière.
 - **Scènes** (ex-Alex Scene Studio) — génère une proposition de couleurs
   harmonieuses pour les lumières d'une pièce déjà configurée, en aperçu
   ajustable avant application.
@@ -94,6 +98,14 @@ deux bibliothèques distinctes :
   reçoivent désormais des teintes différentes si elles sont éloignées
   l'une de l'autre dans la pièce, plutôt que la même teinte automatiquement
   du seul fait de propriétés identiques.
+- **Harmonie basée sur la position réelle en 3D** — l'influence d'une zone
+  (manuelle ou déduite d'un meuble) sur une lumière proche se calcule
+  désormais sur une distance 3D réelle (position ET hauteur, en mètres),
+  pas seulement une distance à plat sur le plan. Un canapé, un fauteuil ou
+  un lit crée automatiquement une zone d'ambiance chaude à proximité ; une
+  TV ou un moniteur PC crée automatiquement une zone plus tamisée et plus
+  froide autour de l'écran (anti-éblouissement) — toujours **en plus** des
+  zones placées à la main, jamais à leur place.
 
 ## Cartes Lovelace
 

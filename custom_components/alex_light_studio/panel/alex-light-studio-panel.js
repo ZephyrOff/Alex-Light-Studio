@@ -106,7 +106,34 @@ function kelvinToCss(kelvin) {
 const CLOSE_THRESHOLD = 15; // unites SVG, distance sous laquelle un clic pres du premier point ferme le contour
 const VIEWBOX_W = 800;
 const VIEWBOX_H = 500;
-const GRID_SIZE = 20; // unites SVG entre deux lignes de la grille -- meme pas utilise pour l'accroche des points de mur
+// Conversion pixels (plan 2D / stockage points-lumieres-zones-meubles) <->
+// metres (vue 3D et calcul d'harmonie, qui a besoin d'une distance reelle
+// homogene avec la hauteur des lumieres, deja en metres) -- reglable par
+// piece via Room.scale_px_per_m (this._scalePxPerM), cette constante n'est
+// que la valeur par defaut. Voir _toMeters/_toPx.
+const DEFAULT_PX_PER_METER = 80;
+const GRID_SIZE = DEFAULT_PX_PER_METER * 0.25; // grille = 25 cm (accroche du contour, snapToGrid)
+
+// Vendee localement (pas de CDN, coherent avec une integration HACS
+// autonome) -- servie par le meme mecanisme de chemin statique que ce
+// fichier, voir _async_register_panel cote Python. Chargee paresseusement
+// (voir _ensureThreeLoaded), seulement a la premiere ouverture de la vue
+// 3D, jamais pour les autres vues (Gradient/Zones/Scenes).
+const THREE_VENDOR_URL = "/alex_light_studio_panel/vendor/three.min.js";
+
+// Libere geometrie/materiau de chaque objet d'un groupe Three.js avant de
+// le retirer de la scene -- sans ca, reconstruire la vue 3D a chaque
+// modification (ajout de lumiere/zone/meuble) fuirait de la memoire GPU.
+function disposeThreeGroup(group) {
+  if (!group) return;
+  group.traverse((obj) => {
+    if (obj.geometry) obj.geometry.dispose();
+    if (obj.material) {
+      if (Array.isArray(obj.material)) obj.material.forEach((m) => m.dispose());
+      else obj.material.dispose();
+    }
+  });
+}
 
 function snapToGrid(v) {
   return Math.round(v / GRID_SIZE) * GRID_SIZE;
@@ -114,6 +141,25 @@ function snapToGrid(v) {
 
 const MOUNT_TYPE_LABELS = { ceiling: "Plafond", wall: "Mur", desk: "Bureau" };
 const ROLE_LABELS = { primary: "Principale", accent: "Accentuation", ambient: "Ambiance" };
+
+// Miroir JS de const.FURNITURE_TYPES (Python) -- catalogue des meubles
+// placables dans la vue 3D. Dimensions par defaut en metres, categorie
+// utilisee uniquement pour la couleur/le rendu cote client (l'influence
+// automatique sur l'harmonie est calculee cote serveur, harmony.
+// furniture_to_zone_inputs). "defaultElevation" : hauteur de pose par
+// defaut au-dessus du sol -- une TV/un moniteur ne reposent pas au sol.
+const FURNITURE_TYPES = {
+  sofa: { label: "Canapé", width: 1.8, depth: 0.85, height: 0.8, category: "cozy", color: "#6d4c41", defaultElevation: 0 },
+  armchair: { label: "Fauteuil", width: 0.8, depth: 0.8, height: 0.85, category: "cozy", color: "#795548", defaultElevation: 0 },
+  bed: { label: "Lit", width: 1.6, depth: 2.0, height: 0.55, category: "cozy", color: "#8d6e63", defaultElevation: 0 },
+  tv: { label: "Télévision", width: 1.1, depth: 0.08, height: 0.65, category: "screen", color: "#212121", defaultElevation: 0.5 },
+  monitor: { label: "Moniteur PC", width: 0.6, depth: 0.2, height: 0.4, category: "screen", color: "#212121", defaultElevation: 0.75 },
+  table: { label: "Table", width: 1.2, depth: 0.8, height: 0.75, category: "neutral", color: "#a1887f", defaultElevation: 0 },
+  desk: { label: "Bureau", width: 1.2, depth: 0.6, height: 0.75, category: "neutral", color: "#a1887f", defaultElevation: 0 },
+  bookshelf: { label: "Bibliothèque", width: 0.9, depth: 0.3, height: 1.8, category: "neutral", color: "#6d4c41", defaultElevation: 0 },
+  plant: { label: "Plante", width: 0.4, depth: 0.4, height: 1.2, category: "neutral", color: "#2e7d32", defaultElevation: 0 },
+  other: { label: "Autre", width: 0.6, depth: 0.6, height: 0.8, category: "neutral", color: "#616161", defaultElevation: 0 },
+};
 
 // Miroir JS de harmony.derive_role (Python) -- uniquement pour l'apercu
 // live dans le formulaire de placement. Le calcul qui compte reellement
@@ -157,6 +203,22 @@ function zonePayload(z) {
     hue: z.hue,
     saturation: z.saturation != null ? z.saturation : 70,
     influence_radius: z.influence_radius != null ? z.influence_radius : 150,
+    z: z.z != null ? z.z : 1.2,
+  };
+}
+
+function furniturePayload(f) {
+  return {
+    id: f.id,
+    furniture_type: f.furniture_type,
+    x: f.x,
+    y: f.y,
+    rotation: f.rotation != null ? f.rotation : 0,
+    elevation: f.elevation != null ? f.elevation : 0,
+    width: f.width,
+    depth: f.depth,
+    height: f.height,
+    label: f.label || "",
   };
 }
 
@@ -214,9 +276,12 @@ class AlexLightStudioPanel extends HTMLElement {
     this._points = []; // contour, ferme des que _closed = true
     this._closed = false;
     this._lights = []; // {entity_id, x, y, mount_type, height, direction, importance, light_type, power}
-    this._zones = []; // {name, x, y, hue, saturation, influence_radius}
+    this._zones = []; // {name, x, y, hue, saturation, influence_radius, z}
+    this._furniture = []; // {id, furniture_type, x, y, rotation, elevation, width, depth, height, label}
+    this._roomHeight = 2.5; // metres sous plafond, vue 3D
+    this._scalePxPerM = DEFAULT_PX_PER_METER; // conversion points/x/y (px) <-> metres, reglable par piece
 
-    // Mode de placement au clic dans le contour : "light" ou "zone".
+    // Mode de placement au clic dans le contour : "light", "zone" ou "furniture".
     this._placementMode = "light";
 
     // Selections courantes pour le placement de la prochaine lumiere.
@@ -233,10 +298,28 @@ class AlexLightStudioPanel extends HTMLElement {
     this._pendingZoneHue = 30;
     this._pendingZoneSaturation = 70;
     this._pendingZoneRadius = 150;
+    this._pendingZoneHeight = 1.2; // metres
 
-    // Glisser-depose : point de mur, lumiere ou zone en cours de deplacement.
-    // { kind: "point"|"light"|"zone", index: N, startX, startY } ou null.
+    // Selections courantes pour le placement du prochain meuble -- les
+    // dimensions se pre-remplissent depuis FURNITURE_TYPES au changement de
+    // type (voir #furniture-type-select), modifiables ensuite.
+    this._pendingFurnitureType = "sofa";
+    this._pendingFurnitureWidth = FURNITURE_TYPES.sofa.width;
+    this._pendingFurnitureDepth = FURNITURE_TYPES.sofa.depth;
+    this._pendingFurnitureHeight = FURNITURE_TYPES.sofa.height;
+    this._pendingFurnitureElevation = FURNITURE_TYPES.sofa.defaultElevation;
+
+    // Glisser-depose : point de mur, lumiere, zone ou meuble en cours de
+    // deplacement. { kind: "point"|"light"|"zone"|"furniture", index: N,
+    // startX, startY } ou null.
     this._dragging = null;
+
+    // Vue 3D (Three.js, vendee dans panel/vendor/, chargee paresseusement --
+    // voir _ensureThreeLoaded). Etat du moteur de rendu, distinct de l'etat
+    // de donnees ci-dessus (_lights/_zones/_furniture restent la source de
+    // verite ; la scene Three.js n'est qu'une projection reconstruite dessus).
+    this._three = null; // { renderer, scene, camera, roomGroup, objectsGroup, raycaster, ... }
+    this._threeLoadPromise = null;
 
     // Section Scene (phase 2) : parametres de generation + derniere
     // proposition calculee (jamais appliquee tant que l'utilisateur n'a pas
@@ -312,6 +395,22 @@ class AlexLightStudioPanel extends HTMLElement {
     }
   }
 
+  // Libere le contexte WebGL de la vue 3D -- les navigateurs plafonnent le
+  // nombre de contextes WebGL simultanes (~16), et HA peut deconnecter/
+  // reconnecter ce custom element en changeant de panel plusieurs fois dans
+  // la meme session.
+  disconnectedCallback() {
+    this._threeDisposeScene();
+  }
+
+  _threeDisposeScene() {
+    if (!this._three) return;
+    if (this._three.animationFrame) cancelAnimationFrame(this._three.animationFrame);
+    if (this._three.resizeObserver) this._three.resizeObserver.disconnect();
+    if (this._three.renderer) this._three.renderer.dispose();
+    this._three = null;
+  }
+
   async _loadRooms() {
     this._loading = true;
     this._error = null;
@@ -334,6 +433,9 @@ class AlexLightStudioPanel extends HTMLElement {
     this._closed = false;
     this._lights = [];
     this._zones = [];
+    this._furniture = [];
+    this._roomHeight = 2.5;
+    this._scalePxPerM = DEFAULT_PX_PER_METER;
     this._placementMode = "light";
     this._pendingEntity = "";
     this._pendingMountType = "ceiling";
@@ -346,6 +448,12 @@ class AlexLightStudioPanel extends HTMLElement {
     this._pendingZoneHue = 30;
     this._pendingZoneSaturation = 70;
     this._pendingZoneRadius = 150;
+    this._pendingZoneHeight = 1.2;
+    this._pendingFurnitureType = "sofa";
+    this._pendingFurnitureWidth = FURNITURE_TYPES.sofa.width;
+    this._pendingFurnitureDepth = FURNITURE_TYPES.sofa.depth;
+    this._pendingFurnitureHeight = FURNITURE_TYPES.sofa.height;
+    this._pendingFurnitureElevation = FURNITURE_TYPES.sofa.defaultElevation;
     this._dragging = null;
     this._suggestions = null;
     this._previewMode = false;
@@ -369,8 +477,14 @@ class AlexLightStudioPanel extends HTMLElement {
     this._zones = (room.zones || []).map((z) => ({
       saturation: 70,
       influence_radius: 150,
+      z: 1.2,
       ...z,
     }));
+    // room.height/scale_px_per_m/furniture : absents sur une piece
+    // enregistree avant l'ajout de la vue 3D -- repli sur les defauts.
+    this._furniture = (room.furniture || []).map((f) => ({ rotation: 0, elevation: 0, label: "", ...f }));
+    this._roomHeight = room.height != null ? room.height : 2.5;
+    this._scalePxPerM = room.scale_px_per_m != null ? room.scale_px_per_m : DEFAULT_PX_PER_METER;
     // Une proposition generee pour une AUTRE piece n'a plus de sens ici.
     this._suggestions = null;
     this._previewMode = false;
@@ -378,13 +492,19 @@ class AlexLightStudioPanel extends HTMLElement {
     this._renderCanvas();
     this._renderLightsList();
     this._renderZonesList();
+    this._renderFurnitureList();
     this._renderScenePreviewList();
     this._renderRoomList();
+    this._rebuildThreeRoom();
   }
 
   _syncEditorInputs() {
     const nameInput = this.shadowRoot.querySelector("#room-name");
     if (nameInput) nameInput.value = this._roomName;
+    const heightInput = this.shadowRoot.querySelector("#room-height-input");
+    if (heightInput) heightInput.value = this._roomHeight;
+    const scaleInput = this.shadowRoot.querySelector("#room-scale-input");
+    if (scaleInput) scaleInput.value = this._scalePxPerM;
   }
 
   // -----------------------------------------------------------------------
@@ -599,6 +719,38 @@ class AlexLightStudioPanel extends HTMLElement {
               <button class="btn btn-outline" id="undo-point-btn">Annuler le dernier point</button>
               <button class="btn btn-outline" id="reset-outline-btn">Recommencer le contour</button>
             </div>
+            <div class="row" id="room-height-row" style="display:none;margin-top:14px;">
+              <label>Hauteur plafond (m)</label>
+              <input type="number" id="room-height-input" min="1.8" max="6" step="0.05" value="2.5" />
+            </div>
+            <details id="room-scale-details" style="display:none;">
+              <summary style="cursor:pointer;font-size:12px;color:var(--secondary-text-color);">Échelle avancée</summary>
+              <div class="row" style="margin-top:8px;">
+                <label>Pixels / mètre</label>
+                <input type="number" id="room-scale-input" min="20" max="400" step="1" value="80" />
+              </div>
+              <div class="hint">
+                À ajuster seulement si la vue 3D paraît disproportionnée pour une pièce créée avant
+                l'ajout de la vue 3D (son contour n'avait pas d'échelle réelle) — inutile d'y toucher
+                pour une nouvelle pièce.
+              </div>
+            </details>
+          </div>
+
+          <div class="card" id="view3d-card" style="display:none;margin-top:20px;">
+            <h2>Vue 3D</h2>
+            <div id="threed-wrap" style="position:relative;border-radius:10px;overflow:hidden;background:#0b0b0f;border:1px solid var(--divider-color,#444);">
+              <canvas id="threed-canvas" style="display:block;width:100%;height:440px;touch-action:none;"></canvas>
+              <div id="threed-loading" class="hint" style="position:absolute;top:8px;left:8px;margin:0;">Chargement…</div>
+            </div>
+            <div class="actions" style="margin-top:10px;">
+              <button class="btn btn-outline" id="threed-topview-btn">Vue de dessus</button>
+            </div>
+            <div class="hint" id="threed-hint">
+              Glisser : orbiter. Molette : zoom. Glisser avec Maj (Shift) : déplacer la vue. Clique au sol
+              dans le contour pour placer l'élément choisi ci-dessous ; glisse un objet déjà placé pour le
+              repositionner.
+            </div>
           </div>
 
           <div id="view-room">
@@ -610,6 +762,7 @@ class AlexLightStudioPanel extends HTMLElement {
               <select id="placement-mode-select">
                 <option value="light">Une lumière</option>
                 <option value="zone">Une zone</option>
+                <option value="furniture">Un meuble</option>
               </select>
             </div>
           </div>
@@ -686,12 +839,49 @@ class AlexLightStudioPanel extends HTMLElement {
               <label>Portée</label>
               <input type="range" id="zone-radius-input" min="20" max="400" value="150" />
             </div>
+            <div class="row">
+              <label>Hauteur (m)</label>
+              <input type="number" id="zone-height-input" min="0" max="6" step="0.1" value="1.2" />
+            </div>
             <div class="hint">
-              Une zone influence les lumières proches vers sa teinte — l'influence décroît avec la distance et
-              s'annule à la portée choisie. Donne un nom à la zone ci-dessus, puis clique dans le contour pour
-              la placer. Une fois placée, glisse-la pour la repositionner.
+              Une zone influence les lumières proches vers sa teinte — l'influence décroît avec la distance
+              <strong>3D réelle</strong> (position ET hauteur) et s'annule à la portée choisie. Donne un nom à la zone
+              ci-dessus, choisis sa hauteur (ex. hauteur d'écran pour un mur TV), puis clique dans le contour
+              (ou dans la vue 3D) pour la placer. Une fois placée, glisse-la pour la repositionner.
             </div>
             <div id="zones-list" style="margin-top:12px;"></div>
+          </div>
+
+          <div class="card" id="furniture-card" style="display:none;">
+            <h2>Meubles</h2>
+            <div class="row">
+              <label>Type</label>
+              <select id="furniture-type-select"></select>
+            </div>
+            <div class="row">
+              <label>Largeur (m)</label>
+              <input type="number" id="furniture-width-input" min="0.1" max="4" step="0.05" />
+            </div>
+            <div class="row">
+              <label>Profondeur (m)</label>
+              <input type="number" id="furniture-depth-input" min="0.1" max="4" step="0.05" />
+            </div>
+            <div class="row">
+              <label>Hauteur (m)</label>
+              <input type="number" id="furniture-height-input" min="0.1" max="3" step="0.05" />
+            </div>
+            <div class="row">
+              <label>Élévation (m)</label>
+              <input type="number" id="furniture-elevation-input" min="0" max="3" step="0.05" />
+            </div>
+            <div class="hint">
+              Choisis un type ci-dessus (les dimensions se pré-remplissent, modifiables), puis clique au sol
+              dans le contour (vue 3D) pour le placer. Glisse-le pour le repositionner ; rotation et
+              suppression se font dans la liste ci-dessous. Un canapé/fauteuil/lit crée automatiquement une
+              ambiance chaude à proximité, une TV/un moniteur une lumière tamisée et plus froide (anti-
+              éblouissement) — en plus des zones manuelles, jamais à leur place.
+            </div>
+            <div id="furniture-list" style="margin-top:12px;"></div>
           </div>
 
           <div class="actions">
@@ -848,11 +1038,13 @@ class AlexLightStudioPanel extends HTMLElement {
       this._closed = false;
       this._lights = [];
       this._zones = [];
+      this._furniture = [];
       this._suggestions = null;
       this._previewMode = false;
       this._renderCanvas();
       this._renderLightsList();
       this._renderZonesList();
+      this._renderFurnitureList();
       this._renderScenePreviewList();
     });
     this.shadowRoot.querySelector("#entity-select").addEventListener("change", (ev) => {
@@ -895,6 +1087,7 @@ class AlexLightStudioPanel extends HTMLElement {
       this._placementMode = ev.target.value;
       this.shadowRoot.querySelector("#lights-card").style.display = this._placementMode === "light" ? "block" : "none";
       this.shadowRoot.querySelector("#zones-card").style.display = this._placementMode === "zone" ? "block" : "none";
+      this.shadowRoot.querySelector("#furniture-card").style.display = this._placementMode === "furniture" ? "block" : "none";
     });
     this.shadowRoot.querySelector("#zone-name").addEventListener("input", (ev) => {
       this._pendingZoneName = ev.target.value;
@@ -908,6 +1101,49 @@ class AlexLightStudioPanel extends HTMLElement {
     this.shadowRoot.querySelector("#zone-radius-input").addEventListener("input", (ev) => {
       this._pendingZoneRadius = parseFloat(ev.target.value);
     });
+    this.shadowRoot.querySelector("#zone-height-input").addEventListener("input", (ev) => {
+      const v = parseFloat(ev.target.value);
+      this._pendingZoneHeight = Number.isFinite(v) ? v : 1.2;
+    });
+    this.shadowRoot.querySelector("#room-height-input").addEventListener("input", (ev) => {
+      const v = parseFloat(ev.target.value);
+      this._roomHeight = Number.isFinite(v) && v > 0 ? v : 2.5;
+      this._rebuildThreeRoom();
+    });
+    this.shadowRoot.querySelector("#room-scale-input").addEventListener("input", (ev) => {
+      const v = parseFloat(ev.target.value);
+      this._scalePxPerM = Number.isFinite(v) && v > 0 ? v : DEFAULT_PX_PER_METER;
+      this._rebuildThreeRoom();
+      this._rebuildThreeObjects();
+    });
+    this._populateFurnitureTypeSelect();
+    this.shadowRoot.querySelector("#furniture-type-select").addEventListener("change", (ev) => {
+      this._pendingFurnitureType = ev.target.value;
+      const catalog = FURNITURE_TYPES[this._pendingFurnitureType] || FURNITURE_TYPES.other;
+      this._pendingFurnitureWidth = catalog.width;
+      this._pendingFurnitureDepth = catalog.depth;
+      this._pendingFurnitureHeight = catalog.height;
+      this._pendingFurnitureElevation = catalog.defaultElevation;
+      this._syncFurnitureFormInputs();
+    });
+    this.shadowRoot.querySelector("#furniture-width-input").addEventListener("input", (ev) => {
+      const v = parseFloat(ev.target.value);
+      this._pendingFurnitureWidth = Number.isFinite(v) && v > 0 ? v : this._pendingFurnitureWidth;
+    });
+    this.shadowRoot.querySelector("#furniture-depth-input").addEventListener("input", (ev) => {
+      const v = parseFloat(ev.target.value);
+      this._pendingFurnitureDepth = Number.isFinite(v) && v > 0 ? v : this._pendingFurnitureDepth;
+    });
+    this.shadowRoot.querySelector("#furniture-height-input").addEventListener("input", (ev) => {
+      const v = parseFloat(ev.target.value);
+      this._pendingFurnitureHeight = Number.isFinite(v) && v > 0 ? v : this._pendingFurnitureHeight;
+    });
+    this.shadowRoot.querySelector("#furniture-elevation-input").addEventListener("input", (ev) => {
+      const v = parseFloat(ev.target.value);
+      this._pendingFurnitureElevation = Number.isFinite(v) && v >= 0 ? v : 0;
+    });
+    this.shadowRoot.querySelector("#threed-topview-btn").addEventListener("click", () => this._threeResetCameraTopView());
+    this._syncFurnitureFormInputs();
     this.shadowRoot.querySelector("#save-room-btn").addEventListener("click", () => this._saveRoom());
     this._updateDerivedRolePreview();
 
@@ -1204,10 +1440,34 @@ class AlexLightStudioPanel extends HTMLElement {
     if (lightsCard) lightsCard.style.display = this._closed && this._placementMode === "light" ? "block" : "none";
     if (zonesCard) zonesCard.style.display = this._closed && this._placementMode === "zone" ? "block" : "none";
     if (sceneCard) sceneCard.style.display = this._closed && this._lights.length ? "block" : "none";
+    const furnitureCard = this.shadowRoot.querySelector("#furniture-card");
+    if (furnitureCard) furnitureCard.style.display = this._closed && this._placementMode === "furniture" ? "block" : "none";
+    const roomHeightRow = this.shadowRoot.querySelector("#room-height-row");
+    if (roomHeightRow) roomHeightRow.style.display = this._closed ? "flex" : "none";
+    const roomScaleDetails = this.shadowRoot.querySelector("#room-scale-details");
+    if (roomScaleDetails) roomScaleDetails.style.display = this._closed ? "block" : "none";
+    const view3dCard = this.shadowRoot.querySelector("#view3d-card");
+    if (view3dCard) view3dCard.style.display = this._closed ? "block" : "none";
     if (drawHint) {
       drawHint.textContent = this._closed
         ? "Contour terminé. Glisse un point, une lumière ou une zone pour la repositionner ; « Recommencer le contour » pour tout retracer."
         : "Clique dans le plan pour placer les coins du contour (accroché à la grille). Clique près du premier point pour refermer.";
+    }
+    if (this._closed && this._points.length >= 3) {
+      this._ensureThreeLoaded()
+        .then(() => {
+          this._initThreeScene();
+          this._rebuildThreeRoom();
+          this._rebuildThreeObjects();
+        })
+        .catch((err) => {
+          console.error("Alex Light Studio - échec du chargement de la vue 3D :", err);
+          const loading = this.shadowRoot.querySelector("#threed-loading");
+          if (loading) loading.textContent = "Vue 3D indisponible (échec de chargement).";
+        });
+    } else if (this._three) {
+      this._rebuildThreeRoom();
+      this._rebuildThreeObjects();
     }
 
     const pointsAttr = this._points.map((p) => `${p.x},${p.y}`).join(" ");
@@ -1384,14 +1644,24 @@ class AlexLightStudioPanel extends HTMLElement {
       .map((z, i) => {
         const swatch = hsvToCss(z.hue, z.saturation, 220);
         return `
-          <div class="light-item" data-index="${i}">
+          <div class="light-item" data-index="${i}" style="flex-wrap:wrap;">
             <span style="width:14px;height:14px;border-radius:50%;background:${swatch};flex:0 0 14px;"></span>
             <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(z.name)}</span>
             <span style="color:var(--secondary-text-color);">portée ${Math.round(z.influence_radius)}</span>
+            <input type="number" class="zone-height" data-index="${i}" min="0" max="6" step="0.1"
+                   value="${z.z != null ? z.z : 1.2}" style="width:56px;flex:0 0 56px;" title="Hauteur (m)" />
             <span class="del-btn" data-del-zone-index="${i}">✕</span>
           </div>`;
       })
       .join("");
+    list.querySelectorAll(".zone-height").forEach((el) => {
+      el.addEventListener("input", (ev) => {
+        const idx = parseInt(el.getAttribute("data-index"), 10);
+        const v = parseFloat(ev.target.value);
+        this._zones[idx].z = Number.isFinite(v) ? v : 1.2;
+        this._rebuildThreeObjects();
+      });
+    });
     list.querySelectorAll("[data-del-zone-index]").forEach((el) => {
       el.addEventListener("click", () => {
         const idx = parseInt(el.getAttribute("data-del-zone-index"), 10);
@@ -1400,6 +1670,455 @@ class AlexLightStudioPanel extends HTMLElement {
         this._renderZonesList();
       });
     });
+  }
+
+  // -----------------------------------------------------------------------
+  // Meubles (vue 3D) -- catalogue, formulaire de placement, liste editable.
+  // -----------------------------------------------------------------------
+  _populateFurnitureTypeSelect() {
+    const sel = this.shadowRoot.querySelector("#furniture-type-select");
+    if (!sel) return;
+    sel.innerHTML = Object.keys(FURNITURE_TYPES)
+      .map((type) => `<option value="${type}">${escapeHtml(FURNITURE_TYPES[type].label)}</option>`)
+      .join("");
+    sel.value = this._pendingFurnitureType;
+  }
+
+  _syncFurnitureFormInputs() {
+    const widthInput = this.shadowRoot.querySelector("#furniture-width-input");
+    if (widthInput) widthInput.value = this._pendingFurnitureWidth;
+    const depthInput = this.shadowRoot.querySelector("#furniture-depth-input");
+    if (depthInput) depthInput.value = this._pendingFurnitureDepth;
+    const heightInput = this.shadowRoot.querySelector("#furniture-height-input");
+    if (heightInput) heightInput.value = this._pendingFurnitureHeight;
+    const elevationInput = this.shadowRoot.querySelector("#furniture-elevation-input");
+    if (elevationInput) elevationInput.value = this._pendingFurnitureElevation;
+  }
+
+  _addFurnitureAt(px, py) {
+    this._furniture.push({
+      id: `f-${Date.now()}-${Math.round(Math.random() * 1e6)}`,
+      furniture_type: this._pendingFurnitureType,
+      x: px,
+      y: py,
+      rotation: 0,
+      elevation: this._pendingFurnitureElevation,
+      width: this._pendingFurnitureWidth,
+      depth: this._pendingFurnitureDepth,
+      height: this._pendingFurnitureHeight,
+      label: "",
+    });
+    this._rebuildThreeObjects();
+    this._renderFurnitureList();
+  }
+
+  _renderFurnitureList() {
+    const list = this.shadowRoot.querySelector("#furniture-list");
+    if (!list) return;
+    if (!this._furniture.length) {
+      list.innerHTML = `<div class="empty">Aucun meuble placé pour l'instant.</div>`;
+      return;
+    }
+    list.innerHTML = this._furniture
+      .map((f, i) => {
+        const catalog = FURNITURE_TYPES[f.furniture_type] || FURNITURE_TYPES.other;
+        const rotation = f.rotation || 0;
+        return `
+          <div class="light-item" data-index="${i}" style="flex-wrap:wrap;">
+            <span style="width:14px;height:14px;border-radius:3px;background:${catalog.color};flex:0 0 14px;"></span>
+            <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(catalog.label)}</span>
+            <input type="range" class="furniture-rotation" data-index="${i}" min="0" max="359" step="5"
+                   value="${rotation}" style="width:90px;flex:0 0 90px;" title="Rotation (${Math.round(rotation)}°)" />
+            <span class="del-btn" data-del-furniture-index="${i}">✕</span>
+          </div>`;
+      })
+      .join("");
+    list.querySelectorAll(".furniture-rotation").forEach((el) => {
+      el.addEventListener("input", (ev) => {
+        const idx = parseInt(el.getAttribute("data-index"), 10);
+        const v = parseFloat(ev.target.value);
+        this._furniture[idx].rotation = Number.isFinite(v) ? v : 0;
+        el.title = `Rotation (${Math.round(this._furniture[idx].rotation)}°)`;
+        this._rebuildThreeObjects();
+      });
+    });
+    list.querySelectorAll("[data-del-furniture-index]").forEach((el) => {
+      el.addEventListener("click", () => {
+        const idx = parseInt(el.getAttribute("data-del-furniture-index"), 10);
+        this._furniture.splice(idx, 1);
+        this._rebuildThreeObjects();
+        this._renderFurnitureList();
+      });
+    });
+  }
+
+  // -----------------------------------------------------------------------
+  // Vue 3D (Three.js) -- construction paresseuse de la scene (chargement du
+  // script vendu au premier besoin), extrusion de la piece depuis le
+  // contour 2D, visualisation des lumieres/zones, placement/glisser-depose/
+  // rotation des meubles. Camera orbitale/zoom/pan maison (pas d'
+  // OrbitControls vendu -- l'arborescence examples/ recente de three.js est
+  // module-only et fragile a figer pour un simple besoin d'orbite/zoom/pan).
+  // -----------------------------------------------------------------------
+  _ensureThreeLoaded() {
+    if (window.THREE) return Promise.resolve();
+    if (this._threeLoadPromise) return this._threeLoadPromise;
+    this._threeLoadPromise = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = THREE_VENDOR_URL;
+      script.onload = () => resolve();
+      script.onerror = () => reject(new Error("Échec du chargement de Three.js"));
+      document.head.appendChild(script);
+    });
+    return this._threeLoadPromise;
+  }
+
+  _initThreeScene() {
+    if (this._three || !window.THREE) return;
+    const THREE = window.THREE;
+    const canvas = this.shadowRoot.querySelector("#threed-canvas");
+    if (!canvas) return;
+
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0b0b0f);
+    const camera = new THREE.PerspectiveCamera(50, 1, 0.05, 100);
+    scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
+    dirLight.position.set(3, 6, 4);
+    scene.add(dirLight);
+
+    this._three = {
+      renderer,
+      scene,
+      camera,
+      raycaster: new THREE.Raycaster(),
+      floorPlane: new THREE.Plane(new THREE.Vector3(0, 1, 0), 0),
+      roomGroup: null,
+      objectsGroup: null,
+      furnitureMeshes: [],
+      cameraState: null,
+      resizeObserver: null,
+      animationFrame: null,
+    };
+
+    const resize = () => this._threeResizeRenderer();
+    if (window.ResizeObserver) {
+      this._three.resizeObserver = new ResizeObserver(resize);
+      this._three.resizeObserver.observe(canvas);
+    }
+    resize();
+
+    canvas.addEventListener("pointerdown", (ev) => this._onThreePointerDown(ev));
+    canvas.addEventListener("pointermove", (ev) => this._onThreePointerMove(ev));
+    canvas.addEventListener("pointerup", (ev) => this._onThreePointerUp(ev));
+    canvas.addEventListener("pointercancel", (ev) => this._onThreePointerUp(ev));
+    canvas.addEventListener("wheel", (ev) => this._onThreeWheel(ev), { passive: false });
+    canvas.addEventListener("contextmenu", (ev) => ev.preventDefault());
+
+    const animate = () => {
+      if (!this._three) return;
+      this._three.renderer.render(this._three.scene, this._three.camera);
+      this._three.animationFrame = requestAnimationFrame(animate);
+    };
+    animate();
+
+    const loading = this.shadowRoot.querySelector("#threed-loading");
+    if (loading) loading.style.display = "none";
+  }
+
+  _threeResizeRenderer() {
+    const t = this._three;
+    const canvas = this.shadowRoot.querySelector("#threed-canvas");
+    if (!t || !canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) return;
+    t.renderer.setSize(rect.width, rect.height, false);
+    t.camera.aspect = rect.width / rect.height;
+    t.camera.updateProjectionMatrix();
+  }
+
+  // px (plan 2D, stockage) <-> metres (monde Three.js, plan XZ au sol).
+  _worldFromPx(px, py) {
+    const s = this._scalePxPerM || DEFAULT_PX_PER_METER;
+    return { x: px / s, z: py / s };
+  }
+
+  _pxFromWorld(x, z) {
+    const s = this._scalePxPerM || DEFAULT_PX_PER_METER;
+    return { x: x * s, y: z * s };
+  }
+
+  _rebuildThreeRoom() {
+    const t = this._three;
+    if (!t || !window.THREE) return;
+    const THREE = window.THREE;
+    if (t.roomGroup) {
+      t.scene.remove(t.roomGroup);
+      disposeThreeGroup(t.roomGroup);
+    }
+    const group = new THREE.Group();
+    t.roomGroup = group;
+    t.scene.add(group);
+    if (this._points.length < 3 || !this._closed) return;
+
+    const worldPoints = this._points.map((p) => this._worldFromPx(p.x, p.y));
+
+    const shape = new THREE.Shape(worldPoints.map((p) => new THREE.Vector2(p.x, p.z)));
+    const floorGeom = new THREE.ShapeGeometry(shape);
+    floorGeom.rotateX(Math.PI / 2);
+    const floorMat = new THREE.MeshStandardMaterial({ color: 0x2a2a30, side: THREE.DoubleSide, roughness: 0.9 });
+    group.add(new THREE.Mesh(floorGeom, floorMat));
+
+    const height = this._roomHeight || 2.5;
+    const wallMat = new THREE.MeshStandardMaterial({ color: 0x3a3a42, roughness: 0.95, transparent: true, opacity: 0.55, side: THREE.DoubleSide });
+    for (let i = 0; i < worldPoints.length; i++) {
+      const a = worldPoints[i];
+      const b = worldPoints[(i + 1) % worldPoints.length];
+      const dx = b.x - a.x;
+      const dz = b.z - a.z;
+      const length = Math.hypot(dx, dz);
+      if (length < 0.01) continue;
+      const wallGeom = new THREE.BoxGeometry(length, height, 0.05);
+      const wall = new THREE.Mesh(wallGeom, wallMat);
+      wall.position.set((a.x + b.x) / 2, height / 2, (a.z + b.z) / 2);
+      wall.rotation.y = -Math.atan2(dz, dx);
+      group.add(wall);
+    }
+
+    const span = Math.max(2, ...worldPoints.map((p) => Math.max(Math.abs(p.x), Math.abs(p.z)))) * 2.4;
+    group.add(new THREE.GridHelper(span, Math.round(span / 0.5), 0x444455, 0x24242c));
+
+    if (!t.cameraState) this._threeFrameRoom(worldPoints);
+  }
+
+  _rebuildThreeObjects() {
+    const t = this._three;
+    if (!t || !window.THREE) return;
+    const THREE = window.THREE;
+    if (t.objectsGroup) {
+      t.scene.remove(t.objectsGroup);
+      disposeThreeGroup(t.objectsGroup);
+    }
+    const group = new THREE.Group();
+    t.objectsGroup = group;
+    t.scene.add(group);
+    t.furnitureMeshes = [];
+
+    // Lumieres -- visualisation seule ici ; placement/glisser-depose restent
+    // dans le plan 2D (deja precis et testé), la 3D sert a VOIR l'espace.
+    this._lights.forEach((l) => {
+      const world = this._worldFromPx(l.x, l.y);
+      const color = l.mount_type === "ceiling" ? 0xf4a935 : l.mount_type === "wall" ? 0x4caf50 : 0xe91e63;
+      const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(0.09, 12, 12),
+        new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.7 })
+      );
+      mesh.position.set(world.x, l.height != null ? l.height : 2.2, world.z);
+      group.add(mesh);
+    });
+
+    // Zones -- sphere translucide = portee d'influence REELLE (falloff 3D
+    // cote harmony.py), rend visible ce que "harmonieux selon la position"
+    // veut dire concretement.
+    this._zones.forEach((z) => {
+      const world = this._worldFromPx(z.x, z.y);
+      const color = new THREE.Color(hsvToCss(z.hue, z.saturation, 220));
+      const radiusM = Math.max(0.05, this._toMeters(z.influence_radius != null ? z.influence_radius : 150));
+      const sphere = new THREE.Mesh(
+        new THREE.SphereGeometry(radiusM, 20, 14),
+        new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.07, depthWrite: false })
+      );
+      sphere.position.set(world.x, z.z != null ? z.z : 1.2, world.z);
+      group.add(sphere);
+      const dot = new THREE.Mesh(new THREE.SphereGeometry(0.06, 10, 10), new THREE.MeshBasicMaterial({ color }));
+      dot.position.copy(sphere.position);
+      group.add(dot);
+    });
+
+    // Meubles -- interactifs (placement/glisser-depose/rotation/suppression).
+    this._furniture.forEach((f, i) => {
+      const world = this._worldFromPx(f.x, f.y);
+      const catalog = FURNITURE_TYPES[f.furniture_type] || FURNITURE_TYPES.other;
+      const w = f.width || catalog.width;
+      const d = f.depth || catalog.depth;
+      const h = f.height || catalog.height;
+      const mesh = new THREE.Mesh(
+        new THREE.BoxGeometry(w, h, d),
+        new THREE.MeshStandardMaterial({ color: catalog.color, roughness: 0.8 })
+      );
+      mesh.position.set(world.x, (f.elevation || 0) + h / 2, world.z);
+      mesh.rotation.y = -((f.rotation || 0) * Math.PI) / 180;
+      mesh.userData.furnitureIndex = i;
+      group.add(mesh);
+      t.furnitureMeshes.push(mesh);
+    });
+  }
+
+  _threeFrameRoom(worldPoints) {
+    const t = this._three;
+    if (!t) return;
+    const THREE = window.THREE;
+    const pts = worldPoints && worldPoints.length ? worldPoints : [{ x: 0, z: 0 }];
+    const xs = pts.map((p) => p.x);
+    const zs = pts.map((p) => p.z);
+    const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+    const cz = (Math.min(...zs) + Math.max(...zs)) / 2;
+    const span = Math.max(1, Math.max(...xs) - Math.min(...xs), Math.max(...zs) - Math.min(...zs));
+    t.cameraState = { target: new THREE.Vector3(cx, 0, cz), radius: span * 1.3 + 2, theta: Math.PI / 4, phi: 0.85 };
+    this._threeUpdateCamera();
+  }
+
+  _threeResetCameraTopView() {
+    const t = this._three;
+    if (!t || !t.cameraState) return;
+    t.cameraState.phi = 0.08;
+    this._threeUpdateCamera();
+  }
+
+  _threeUpdateCamera() {
+    const t = this._three;
+    if (!t || !t.cameraState) return;
+    const { target, radius, theta, phi } = t.cameraState;
+    const clampedPhi = Math.max(0.05, Math.min(Math.PI / 2 - 0.02, phi));
+    const x = target.x + radius * Math.sin(clampedPhi) * Math.sin(theta);
+    const y = radius * Math.cos(clampedPhi);
+    const z = target.z + radius * Math.sin(clampedPhi) * Math.cos(theta);
+    t.camera.position.set(x, y, z);
+    t.camera.lookAt(target);
+  }
+
+  _threePointerFromEvent(ev) {
+    const canvas = this.shadowRoot.querySelector("#threed-canvas");
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: ((ev.clientX - rect.left) / rect.width) * 2 - 1,
+      y: -((ev.clientY - rect.top) / rect.height) * 2 + 1,
+    };
+  }
+
+  _threeIntersectFloor(ndc) {
+    const t = this._three;
+    const THREE = window.THREE;
+    t.raycaster.setFromCamera(ndc, t.camera);
+    const point = new THREE.Vector3();
+    const hit = t.raycaster.ray.intersectPlane(t.floorPlane, point);
+    return hit ? point : null;
+  }
+
+  _threePickFurniture(ndc) {
+    const t = this._three;
+    if (!t.furnitureMeshes || !t.furnitureMeshes.length) return null;
+    t.raycaster.setFromCamera(ndc, t.camera);
+    const hits = t.raycaster.intersectObjects(t.furnitureMeshes, false);
+    return hits.length ? hits[0].object.userData.furnitureIndex : null;
+  }
+
+  _onThreePointerDown(ev) {
+    if (this._activeView !== "room" && this._activeView !== "scene") return;
+    const t = this._three;
+    if (!t) return;
+    ev.currentTarget.setPointerCapture(ev.pointerId);
+    const ndc = this._threePointerFromEvent(ev);
+    const furnitureIndex = this._activeView === "room" ? this._threePickFurniture(ndc) : null;
+    const item = furnitureIndex != null ? this._furniture[furnitureIndex] : null;
+    this._threeDrag = {
+      mode: furnitureIndex != null ? "furniture" : ev.shiftKey ? "pan" : "orbit",
+      furnitureIndex,
+      startClientX: ev.clientX,
+      startClientY: ev.clientY,
+      lastClientX: ev.clientX,
+      lastClientY: ev.clientY,
+      moved: false,
+      startX: item ? item.x : 0,
+      startY: item ? item.y : 0,
+    };
+  }
+
+  _onThreePointerMove(ev) {
+    const drag = this._threeDrag;
+    const t = this._three;
+    if (!drag || !t) return;
+    const dx = ev.clientX - drag.lastClientX;
+    const dy = ev.clientY - drag.lastClientY;
+    if (Math.abs(ev.clientX - drag.startClientX) > 3 || Math.abs(ev.clientY - drag.startClientY) > 3) drag.moved = true;
+    drag.lastClientX = ev.clientX;
+    drag.lastClientY = ev.clientY;
+
+    if (drag.mode === "furniture") {
+      const hit = this._threeIntersectFloor(this._threePointerFromEvent(ev));
+      if (hit) {
+        const px = this._pxFromWorld(hit.x, hit.z);
+        this._furniture[drag.furnitureIndex].x = px.x;
+        this._furniture[drag.furnitureIndex].y = px.y;
+        this._rebuildThreeObjects();
+      }
+      return;
+    }
+
+    if (drag.mode === "orbit") {
+      t.cameraState.theta -= dx * 0.008;
+      t.cameraState.phi -= dy * 0.008;
+      this._threeUpdateCamera();
+      return;
+    }
+
+    if (drag.mode === "pan") {
+      const panSpeed = t.cameraState.radius * 0.0018;
+      const theta = t.cameraState.theta;
+      const rightX = Math.cos(theta);
+      const rightZ = -Math.sin(theta);
+      const fwdX = Math.sin(theta);
+      const fwdZ = Math.cos(theta);
+      t.cameraState.target.x -= rightX * dx * panSpeed - fwdX * dy * panSpeed;
+      t.cameraState.target.z -= rightZ * dx * panSpeed - fwdZ * dy * panSpeed;
+      this._threeUpdateCamera();
+    }
+  }
+
+  _onThreePointerUp(ev) {
+    const drag = this._threeDrag;
+    this._threeDrag = null;
+    if (!drag) return;
+    const canvas = this.shadowRoot.querySelector("#threed-canvas");
+    if (canvas) {
+      try {
+        canvas.releasePointerCapture(ev.pointerId);
+      } catch (e) {
+        // deja relachee -- sans consequence
+      }
+    }
+
+    if (drag.mode === "furniture") {
+      const item = this._furniture[drag.furnitureIndex];
+      if (item && drag.moved && !pointInPolygon(item, this._points)) {
+        item.x = drag.startX;
+        item.y = drag.startY;
+        this._rebuildThreeObjects();
+      }
+      this._renderFurnitureList();
+      return;
+    }
+
+    if (!drag.moved && this._activeView === "room" && this._placementMode === "furniture" && this._closed) {
+      const hit = this._threeIntersectFloor(this._threePointerFromEvent(ev));
+      if (hit) {
+        const px = this._pxFromWorld(hit.x, hit.z);
+        if (pointInPolygon(px, this._points)) {
+          this._addFurnitureAt(px.x, px.y);
+        }
+      }
+    }
+  }
+
+  _onThreeWheel(ev) {
+    const t = this._three;
+    if (!t || !t.cameraState) return;
+    ev.preventDefault();
+    const factor = Math.exp(ev.deltaY * 0.0015);
+    t.cameraState.radius = Math.max(0.8, Math.min(60, t.cameraState.radius * factor));
+    this._threeUpdateCamera();
   }
 
   _renderRoomList() {
@@ -1449,6 +2168,45 @@ class AlexLightStudioPanel extends HTMLElement {
     });
   }
 
+  // x/y (points/lumieres/zones/meubles) restent stockes en pixels du plan
+  // 2D (aucune migration des pieces existantes, voir DEFAULT_PX_PER_METER) --
+  // mais harmony.compute_scene calcule desormais une distance 3D REELLE
+  // (metres), homogene avec la hauteur des lumieres/l'altitude des zones,
+  // deja en metres. Conversion uniquement ici, a la frontiere de l'appel :
+  // le reste du panel (plan 2D, vue 3D d'edition, stockage) continue de
+  // raisonner en pixels.
+  _toMeters(px) {
+    return px / (this._scalePxPerM || DEFAULT_PX_PER_METER);
+  }
+
+  _scenePayloadLights() {
+    return this._lights.map((l) => {
+      const p = lightPayload(l);
+      p.x = this._toMeters(p.x);
+      p.y = this._toMeters(p.y);
+      return p;
+    });
+  }
+
+  _scenePayloadZones() {
+    return this._zones.map((z) => {
+      const p = zonePayload(z);
+      p.x = this._toMeters(p.x);
+      p.y = this._toMeters(p.y);
+      p.influence_radius = this._toMeters(p.influence_radius);
+      return p;
+    });
+  }
+
+  _scenePayloadFurniture() {
+    return this._furniture.map((f) => {
+      const p = furniturePayload(f);
+      p.x = this._toMeters(p.x);
+      p.y = this._toMeters(p.y);
+      return p;
+    });
+  }
+
   async _generateScene() {
     if (this._sceneGenMode === "image" && this._sceneImagePoints.length < 1) {
       alert("Place au moins un point de couleur sur l'image avant de générer.");
@@ -1457,8 +2215,9 @@ class AlexLightStudioPanel extends HTMLElement {
 
     const payload = {
       type: "alex_light_studio/compute_scene",
-      lights: this._lights.map(lightPayload),
-      zones: this._zones.map(zonePayload),
+      lights: this._scenePayloadLights(),
+      zones: this._scenePayloadZones(),
+      furniture: this._scenePayloadFurniture(),
       scheme: this._sceneGenMode === "manual" ? this._sceneScheme : "analogous", // ignore cote serveur si mood/image fourni
       generation_style: this._sceneGenerationStyle,
     };
@@ -1645,6 +2404,9 @@ class AlexLightStudioPanel extends HTMLElement {
       points: this._points.map((p) => ({ x: p.x, y: p.y })),
       lights: this._lights.map(lightPayload),
       zones: this._zones.map(zonePayload),
+      height: this._roomHeight,
+      scale_px_per_m: this._scalePxPerM,
+      furniture: this._furniture.map(furniturePayload),
     };
     if (this._editingRoomId) payload.room_id = this._editingRoomId;
 
