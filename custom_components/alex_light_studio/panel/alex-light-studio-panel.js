@@ -339,6 +339,13 @@ class AlexLightStudioPanel extends HTMLElement {
     // verite ; la scene Three.js n'est qu'une projection reconstruite dessus).
     this._three = null; // { renderer, scene, camera, roomGroup, objectsGroup, raycaster, ... }
     this._threeLoadPromise = null;
+    // Murs masques dans la vue 3D (indices d'arete du contour, 0 = entre
+    // points[0] et points[1], etc.) -- pur confort d'edition (voir/placer
+    // plus facilement a l'interieur), jamais persiste avec la piece ni
+    // envoye au serveur. Reinitialise a chaque nouvelle/rechargement de
+    // piece et a chaque retour a l'edition du contour (les indices n'ont
+    // plus de sens si le nombre de murs change).
+    this._hiddenWalls = new Set();
 
     // Section Scene (phase 2) : parametres de generation + derniere
     // proposition calculee (jamais appliquee tant que l'utilisateur n'a pas
@@ -480,6 +487,7 @@ class AlexLightStudioPanel extends HTMLElement {
     this._dragging = null;
     this._suggestions = null;
     this._previewMode = false;
+    this._hiddenWalls = new Set();
   }
 
   _loadRoomIntoEditor(room) {
@@ -490,6 +498,7 @@ class AlexLightStudioPanel extends HTMLElement {
     // Une piece deja tracee s'ouvre directement en vue 3D -- l'edition du
     // contour est une action explicite (bouton "Modifier le contour").
     this._editingOutline = !this._closed;
+    this._hiddenWalls = new Set();
     // height/direction/light_type/importance/power/is_strip/... : repli sur
     // des valeurs par defaut pour les pieces enregistrees avant l'ajout de
     // ces champs.
@@ -623,6 +632,15 @@ class AlexLightStudioPanel extends HTMLElement {
           border: 1px solid var(--divider-color, #444);
         }
         .seg-tab.active { background: var(--primary-color, #03a9f4); color: white; border-color: transparent; }
+
+        /* --- Boutons "mur visible" (vue 3D) -- multi-selection (pas
+         * exclusifs comme les onglets de placement), un par mur du contour. */
+        .wall-toggle {
+          padding: 6px 10px; border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer;
+          background: rgba(var(--rgb-primary-color,3,169,244),.18); color: var(--primary-text-color, #fff);
+          border: 1px solid var(--primary-color, #03a9f4);
+        }
+        .wall-toggle.hidden-wall { background: transparent; color: var(--secondary-text-color); border-color: var(--divider-color, #444); text-decoration: line-through; }
 
         /* --- Vue Gradient (ex-Alex Gradient Studio) -------------------- */
         .stops-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
@@ -793,18 +811,24 @@ class AlexLightStudioPanel extends HTMLElement {
                 pour une nouvelle pièce.
               </div>
             </details>
+            <div class="row" id="wall-toggles-row" style="align-items:flex-start;">
+              <label style="margin-top:9px;">Murs visibles</label>
+              <div id="wall-toggles" style="display:flex;gap:6px;flex-wrap:wrap;"></div>
+            </div>
             <div id="threed-wrap" style="position:relative;border-radius:10px;overflow:hidden;background:#0b0b0f;border:1px solid var(--divider-color,#444);margin-top:10px;">
               <canvas id="threed-canvas" style="display:block;width:100%;height:440px;touch-action:none;"></canvas>
               <div id="threed-loading" class="hint" style="position:absolute;top:8px;left:8px;margin:0;">Chargement…</div>
+              <div id="threed-height-readout" style="display:none;position:absolute;top:8px;right:8px;margin:0;padding:4px 10px;border-radius:6px;background:rgba(0,0,0,.7);color:white;font-size:12px;font-weight:600;"></div>
             </div>
             <div class="actions" style="margin-top:10px;">
               <button class="btn btn-outline" id="threed-topview-btn">Vue de dessus</button>
               <button class="btn btn-outline" id="edit-outline-btn">Modifier le contour</button>
             </div>
             <div class="hint" id="threed-hint">
-              Glisser : orbiter. Molette : zoom. Glisser avec Maj (Shift) : déplacer la vue. Clique au sol
-              pour placer l'élément choisi ci-dessous (lumière/zone/meuble) ; glisse un objet déjà placé
-              pour le repositionner.
+              Glisser : orbiter. Molette : zoom. Glisser avec Maj (Shift) sur du vide : déplacer la vue.
+              Clique au sol pour placer l'élément choisi ci-dessous (lumière/zone/meuble) ; glisse un objet
+              déjà placé pour le repositionner, ou Maj + glisse-le pour ajuster sa hauteur. Décoche un mur
+              ci-dessus pour le masquer et voir/placer plus facilement à l'intérieur.
             </div>
           </div>
 
@@ -829,6 +853,23 @@ class AlexLightStudioPanel extends HTMLElement {
                   <option value="color">Couleur (RGB)</option>
                   <option value="white">Blanc uniquement</option>
                 </select>
+              </div>
+              <div class="row">
+                <label>Forme</label>
+                <select id="light-shape-select">
+                  <option value="bulb">Ampoule</option>
+                  <option value="strip">Bandeau LED</option>
+                </select>
+              </div>
+              <div id="strip-fields" style="display:none;">
+                <div class="row">
+                  <label>Longueur (m)</label>
+                  <input type="number" id="strip-length-input" min="0.1" max="10" step="0.1" value="1.2" />
+                </div>
+                <div class="row">
+                  <label>Orientation</label>
+                  <input type="range" id="strip-rotation-input" min="0" max="359" step="5" value="0" />
+                </div>
               </div>
               <div class="row">
                 <label>Type</label>
@@ -858,20 +899,6 @@ class AlexLightStudioPanel extends HTMLElement {
                 </select>
               </div>
               <div class="row">
-                <label>Bandeau LED</label>
-                <input type="checkbox" id="strip-toggle" />
-              </div>
-              <div id="strip-fields" style="display:none;">
-                <div class="row">
-                  <label>Longueur (m)</label>
-                  <input type="number" id="strip-length-input" min="0.1" max="10" step="0.1" value="1.2" />
-                </div>
-                <div class="row">
-                  <label>Orientation</label>
-                  <input type="range" id="strip-rotation-input" min="0" max="359" step="5" value="0" />
-                </div>
-              </div>
-              <div class="row">
                 <label>Rôle calculé</label>
                 <span id="derived-role-preview" style="font-weight:600;"></span>
               </div>
@@ -879,10 +906,11 @@ class AlexLightStudioPanel extends HTMLElement {
                 Le <strong>rôle</strong> (principale/accentuation/ambiance) se déduit automatiquement du type
                 de montage et de la direction — pas besoin de le choisir toi-même. La <strong>puissance</strong>
                 (1.0 = référence) réduit automatiquement la consigne d'une lumière plus capable qu'une autre,
-                pour un rendu équivalent. Active <strong>Bandeau LED</strong> pour un ruban/bandeau (affiché
-                comme un segment orienté, pas un simple point) plutôt qu'une ampoule. Choisis tes réglages
-                ci-dessus, puis clique au sol dans la vue 3D pour placer la lumière ; glisse-la ensuite pour
-                la repositionner.
+                pour un rendu équivalent. Choisis <strong>Bandeau LED</strong> comme forme pour un ruban/bandeau
+                (affiché comme un segment orienté, pas un simple point) plutôt qu'une ampoule. Choisis tes
+                réglages ci-dessus, puis clique au sol dans la vue 3D pour placer la lumière ; glisse-la
+                ensuite pour la repositionner (Maj + glisser pour ajuster sa hauteur directement dans la
+                vue 3D).
               </div>
               <div id="lights-list" style="margin-top:12px;"></div>
             </div>
@@ -1105,6 +1133,7 @@ class AlexLightStudioPanel extends HTMLElement {
       this._lights = [];
       this._zones = [];
       this._furniture = [];
+      this._hiddenWalls = new Set();
       this._suggestions = null;
       this._previewMode = false;
       this._renderCanvas();
@@ -1156,8 +1185,8 @@ class AlexLightStudioPanel extends HTMLElement {
         this._updatePlacementTabsUI();
       });
     });
-    this.shadowRoot.querySelector("#strip-toggle").addEventListener("change", (ev) => {
-      this._pendingIsStrip = ev.target.checked;
+    this.shadowRoot.querySelector("#light-shape-select").addEventListener("change", (ev) => {
+      this._pendingIsStrip = ev.target.value === "strip";
       this.shadowRoot.querySelector("#strip-fields").style.display = this._pendingIsStrip ? "block" : "none";
     });
     this.shadowRoot.querySelector("#strip-length-input").addEventListener("input", (ev) => {
@@ -1174,6 +1203,9 @@ class AlexLightStudioPanel extends HTMLElement {
     });
     this.shadowRoot.querySelector("#edit-outline-btn").addEventListener("click", () => {
       this._editingOutline = true;
+      // Le nombre/ordre des murs peut changer en reeditant le contour --
+      // les indices masques precedemment n'auraient plus de sens garantis.
+      this._hiddenWalls = new Set();
       this._renderCanvas();
     });
     this.shadowRoot.querySelector("#zone-name").addEventListener("input", (ev) => {
@@ -1469,6 +1501,7 @@ class AlexLightStudioPanel extends HTMLElement {
     this._lights = [];
     this._zones = [];
     this._furniture = [];
+    this._hiddenWalls = new Set();
     this._suggestions = null;
     this._previewMode = false;
     this._syncEditorInputs();
@@ -1833,12 +1866,15 @@ class AlexLightStudioPanel extends HTMLElement {
       .map((f, i) => {
         const catalog = FURNITURE_TYPES[f.furniture_type] || FURNITURE_TYPES.other;
         const rotation = f.rotation || 0;
+        const elevation = f.elevation || 0;
         return `
           <div class="light-item" data-index="${i}" style="flex-wrap:wrap;">
             <span style="width:14px;height:14px;border-radius:3px;background:${catalog.color};flex:0 0 14px;"></span>
             <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(catalog.label)}</span>
             <input type="range" class="furniture-rotation" data-index="${i}" min="0" max="359" step="5"
                    value="${rotation}" style="width:90px;flex:0 0 90px;" title="Rotation (${Math.round(rotation)}°)" />
+            <input type="number" class="furniture-elevation" data-index="${i}" min="0" max="3" step="0.05"
+                   value="${elevation}" style="width:56px;flex:0 0 56px;" title="Élévation (m)" />
             <span class="del-btn" data-del-furniture-index="${i}">✕</span>
           </div>`;
       })
@@ -1849,6 +1885,14 @@ class AlexLightStudioPanel extends HTMLElement {
         const v = parseFloat(ev.target.value);
         this._furniture[idx].rotation = Number.isFinite(v) ? v : 0;
         el.title = `Rotation (${Math.round(this._furniture[idx].rotation)}°)`;
+        this._rebuildThreeObjects();
+      });
+    });
+    list.querySelectorAll(".furniture-elevation").forEach((el) => {
+      el.addEventListener("input", (ev) => {
+        const idx = parseInt(el.getAttribute("data-index"), 10);
+        const v = parseFloat(ev.target.value);
+        this._furniture[idx].elevation = Number.isFinite(v) && v >= 0 ? v : 0;
         this._rebuildThreeObjects();
       });
     });
@@ -1984,6 +2028,7 @@ class AlexLightStudioPanel extends HTMLElement {
     const height = this._roomHeight || 2.5;
     const wallMat = new THREE.MeshStandardMaterial({ color: 0x3a3a42, roughness: 0.95, transparent: true, opacity: 0.55, side: THREE.DoubleSide });
     for (let i = 0; i < worldPoints.length; i++) {
+      if (this._hiddenWalls.has(i)) continue; // mur masque a la demande (voir #wall-toggles) -- degage la vue/le placement
       const a = worldPoints[i];
       const b = worldPoints[(i + 1) % worldPoints.length];
       const dx = b.x - a.x;
@@ -2001,6 +2046,34 @@ class AlexLightStudioPanel extends HTMLElement {
     group.add(new THREE.GridHelper(span, Math.round(span / 0.5), 0x444455, 0x24242c));
 
     if (!t.cameraState) this._threeFrameRoom(worldPoints);
+    this._renderWallToggles();
+  }
+
+  // Un bouton par mur (arete du contour) -- multi-selection, permet de
+  // masquer un ou plusieurs murs geants qui bloqueraient la vue/le clic de
+  // placement a l'interieur de la piece. Purement une aide d'edition (voir
+  // _hiddenWalls), jamais persistee.
+  _renderWallToggles() {
+    const wrap = this.shadowRoot.querySelector("#wall-toggles");
+    if (!wrap) return;
+    if (this._points.length < 3 || !this._closed) {
+      wrap.innerHTML = "";
+      return;
+    }
+    wrap.innerHTML = this._points
+      .map((_, i) => {
+        const hidden = this._hiddenWalls.has(i);
+        return `<button type="button" class="wall-toggle${hidden ? " hidden-wall" : ""}" data-wall-index="${i}" title="${hidden ? "Mur masqué -- clique pour le réafficher" : "Mur visible -- clique pour le masquer"}">${i + 1}</button>`;
+      })
+      .join("");
+    wrap.querySelectorAll(".wall-toggle").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const idx = parseInt(btn.getAttribute("data-wall-index"), 10);
+        if (this._hiddenWalls.has(idx)) this._hiddenWalls.delete(idx);
+        else this._hiddenWalls.add(idx);
+        this._rebuildThreeRoom();
+      });
+    });
   }
 
   // Reconstruit TOUS les objets interactifs de la piece (lumieres, zones,
@@ -2163,6 +2236,25 @@ class AlexLightStudioPanel extends HTMLElement {
     return kind === "light" ? this._lights : kind === "zone" ? this._zones : this._furniture;
   }
 
+  // Champ qui porte la hauteur de l'objet selon son type -- "height" pour
+  // une lumiere, "z" pour l'ancrage d'une zone (voir harmony.ZoneInput),
+  // "elevation" pour un meuble (hauteur du BAS du meuble, pas son centre).
+  _threeHeightFieldForKind(kind) {
+    return kind === "light" ? "height" : kind === "zone" ? "z" : "elevation";
+  }
+
+  _threeShowHeightReadout(value) {
+    const el = this.shadowRoot.querySelector("#threed-height-readout");
+    if (!el) return;
+    el.textContent = `Hauteur : ${value.toFixed(2)} m`;
+    el.style.display = "block";
+  }
+
+  _threeHideHeightReadout() {
+    const el = this.shadowRoot.querySelector("#threed-height-readout");
+    if (el) el.style.display = "none";
+  }
+
   _onThreePointerDown(ev) {
     if (this._activeView !== "room" && this._activeView !== "scene") return;
     const t = this._three;
@@ -2171,8 +2263,13 @@ class AlexLightStudioPanel extends HTMLElement {
     const ndc = this._threePointerFromEvent(ev);
     const picked = this._activeView === "room" ? this._threePickObject(ndc) : null;
     const item = picked ? this._threeArrayForKind(picked.kind)[picked.index] : null;
+    // Maj (Shift) + glisser sur un objet DEJA place ajuste sa hauteur plutot
+    // que sa position au sol (Maj + glisser sur du vide reste le pan camera
+    // existant -- meme touche, comportement different selon la cible).
+    const verticalMode = !!item && ev.shiftKey;
+    const heightField = item ? this._threeHeightFieldForKind(picked.kind) : null;
     this._threeDrag = {
-      mode: item ? "move" : ev.shiftKey ? "pan" : "orbit",
+      mode: verticalMode ? "move-vertical" : item ? "move" : ev.shiftKey ? "pan" : "orbit",
       kind: picked ? picked.kind : null,
       index: picked ? picked.index : null,
       startClientX: ev.clientX,
@@ -2182,7 +2279,9 @@ class AlexLightStudioPanel extends HTMLElement {
       moved: false,
       startX: item ? item.x : 0,
       startY: item ? item.y : 0,
+      startHeight: item ? item[heightField] || 0 : 0,
     };
+    if (verticalMode) this._threeShowHeightReadout(this._threeDrag.startHeight);
   }
 
   _onThreePointerMove(ev) {
@@ -2194,6 +2293,21 @@ class AlexLightStudioPanel extends HTMLElement {
     if (Math.abs(ev.clientX - drag.startClientX) > 3 || Math.abs(ev.clientY - drag.startClientY) > 3) drag.moved = true;
     drag.lastClientX = ev.clientX;
     drag.lastClientY = ev.clientY;
+
+    if (drag.mode === "move-vertical") {
+      // Delta total depuis le DEBUT du geste (pas incremental) -- evite
+      // toute derive d'arrondi sur un glisser long. Vers le haut de l'ecran
+      // (clientY decroissant) = plus haut dans la piece.
+      const metersPerPixel = 0.01;
+      const maxHeight = (this._roomHeight || 2.5) + 0.5;
+      let newHeight = drag.startHeight - (ev.clientY - drag.startClientY) * metersPerPixel;
+      newHeight = Math.max(0, Math.min(maxHeight, Math.round(newHeight * 100) / 100));
+      const item = this._threeArrayForKind(drag.kind)[drag.index];
+      item[this._threeHeightFieldForKind(drag.kind)] = newHeight;
+      this._threeShowHeightReadout(newHeight);
+      this._rebuildThreeObjects();
+      return;
+    }
 
     if (drag.mode === "move") {
       const hit = this._threeIntersectFloor(this._threePointerFromEvent(ev));
@@ -2244,6 +2358,12 @@ class AlexLightStudioPanel extends HTMLElement {
       } catch (e) {
         // deja relachee -- sans consequence
       }
+    }
+
+    if (drag.mode === "move-vertical") {
+      this._threeHideHeightReadout();
+      this._threeRenderListForKind(drag.kind);
+      return;
     }
 
     if (drag.mode === "move") {
