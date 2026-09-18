@@ -96,6 +96,12 @@ class LightPosition:
     direction: str = "direct"  # "direct" | "indirect"
     importance: float = 0.7  # 0-1
     power: float = 1.0  # puissance/capacite relative -- 1.0 = reference
+    # Representation visuelle uniquement (vue 3D/2D) -- un bandeau/ruban LED
+    # s'affiche comme un segment oriente plutot qu'un point ; n'affecte pas
+    # le calcul d'harmonie (harmony.LightInput ne les recoit pas).
+    is_strip: bool = False
+    length: float = 1.2  # metres
+    strip_rotation: float = 0.0  # degres, autour de l'axe vertical
 
 
 @dataclass
@@ -163,6 +169,10 @@ LIGHT_SCHEMA = {
     # ampoule ne devraient pas recevoir la meme consigne pour un rendu
     # equivalent.
     vol.Optional("power", default=1.0): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=10)),
+    # Purement visuel (vue 3D/2D), voir LightPosition.is_strip.
+    vol.Optional("is_strip", default=False): bool,
+    vol.Optional("length", default=1.2): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=20)),
+    vol.Optional("strip_rotation", default=0.0): vol.Coerce(float),
 }
 
 ZONE_SCHEMA = {

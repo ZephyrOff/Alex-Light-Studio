@@ -9,12 +9,16 @@ et deux cartes Lovelace compagnes servies directement par l'intégration
   LED à segments (Philips Hue Gradient / Aqara LED Strip T1, via
   Zigbee2MQTT), test en direct, et bibliothèque de scènes de dégradé
   réutilisables entre appareils différents (nombre de segments quelconque).
-- **Pièces** (ex-Alex Scene Studio) — dessine le contour d'une pièce en vue
-  de dessus, puis visualise-la en volume dans une vraie **vue 3D** (Three.js,
-  vendu localement) pour y positionner lumières, zones à influence
-  chromatique et **meubles** (canapé, lit, table, TV, moniteur PC...),
-  utile pour comprendre le contexte réel de la pièce avant de placer une
-  lumière.
+- **Pièces** (ex-Alex Scene Studio) — deux étapes séquentielles, jamais
+  affichées en même temps : trace le contour d'une pièce en vue de dessus
+  (2D, précis à la souris), puis bascule automatiquement sur une vraie
+  **vue 3D** (Three.js, vendu localement) qui extrude la pièce en volume et
+  devient la seule surface de travail pour tout le reste — un onglet unique
+  « Ajouter à la pièce » (lumière / zone / meuble) pour positionner,
+  glisser-déposer et faire pivoter lumières, zones à influence chromatique
+  et **meubles** (canapé, lit, table, TV, moniteur PC...). Une lumière peut
+  être déclarée **bandeau LED** (longueur + orientation) et s'affiche alors
+  comme un segment, pas comme un point.
 - **Scènes** (ex-Alex Scene Studio) — génère une proposition de couleurs
   harmonieuses pour les lumières d'une pièce déjà configurée, en aperçu
   ajustable avant application.

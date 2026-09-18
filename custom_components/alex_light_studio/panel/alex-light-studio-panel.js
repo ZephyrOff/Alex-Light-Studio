@@ -192,6 +192,12 @@ function lightPayload(l) {
     importance: l.importance != null ? l.importance : 0.7,
     light_type: l.light_type || "color",
     power: l.power != null ? l.power : 1.0,
+    // Purement visuel (vue 3D/2D) -- represente un bandeau/ruban LED comme
+    // un segment oriente plutot qu'un point, sans effet sur le calcul
+    // d'harmonie (harmony.py ignore ces trois champs).
+    is_strip: !!l.is_strip,
+    length: l.length != null ? l.length : 1.2,
+    strip_rotation: l.strip_rotation != null ? l.strip_rotation : 0,
   };
 }
 
@@ -275,13 +281,19 @@ class AlexLightStudioPanel extends HTMLElement {
     this._roomName = "";
     this._points = []; // contour, ferme des que _closed = true
     this._closed = false;
-    this._lights = []; // {entity_id, x, y, mount_type, height, direction, importance, light_type, power}
+    // Vue active du contour : true = trace/edite le contour en 2D (vue de
+    // dessus, seule facon precise de tracer/ajuster des murs a la souris) ;
+    // false = contour valide, la vue 3D prend le relais pour tout le reste
+    // (placement lumieres/zones/meubles) -- jamais les deux affichees en
+    // meme temps, voir _renderCanvas.
+    this._editingOutline = true;
+    this._lights = []; // {entity_id, x, y, mount_type, height, direction, importance, light_type, power, is_strip, length, strip_rotation}
     this._zones = []; // {name, x, y, hue, saturation, influence_radius, z}
     this._furniture = []; // {id, furniture_type, x, y, rotation, elevation, width, depth, height, label}
     this._roomHeight = 2.5; // metres sous plafond, vue 3D
     this._scalePxPerM = DEFAULT_PX_PER_METER; // conversion points/x/y (px) <-> metres, reglable par piece
 
-    // Mode de placement au clic dans le contour : "light", "zone" ou "furniture".
+    // Mode de placement au clic (dans la vue 3D) : "light", "zone" ou "furniture".
     this._placementMode = "light";
 
     // Selections courantes pour le placement de la prochaine lumiere.
@@ -292,6 +304,13 @@ class AlexLightStudioPanel extends HTMLElement {
     this._pendingLightType = "color"; // "color" | "white" -- choix explicite, plus fiable qu'une detection automatique
     this._pendingImportance = 0.7; // 0-1
     this._pendingPower = 1.0; // puissance/capacite relative -- 1.0 = reference
+    // Bandeau LED (ruban) plutot qu'une ampoule ponctuelle -- affecte
+    // uniquement la representation visuelle (2D/3D), pas le calcul
+    // d'harmonie. Choix EXPLICITE (case a cocher), pas de detection
+    // automatique depuis l'entite -- meme raisonnement que light_type.
+    this._pendingIsStrip = false;
+    this._pendingStripLength = 1.2; // metres
+    this._pendingStripRotation = 0; // degres, autour de l'axe vertical
 
     // Selections courantes pour le placement de la prochaine zone.
     this._pendingZoneName = "";
@@ -431,6 +450,7 @@ class AlexLightStudioPanel extends HTMLElement {
     this._roomName = "";
     this._points = [];
     this._closed = false;
+    this._editingOutline = true;
     this._lights = [];
     this._zones = [];
     this._furniture = [];
@@ -444,6 +464,9 @@ class AlexLightStudioPanel extends HTMLElement {
     this._pendingLightType = "color";
     this._pendingImportance = 0.7;
     this._pendingPower = 1.0;
+    this._pendingIsStrip = false;
+    this._pendingStripLength = 1.2;
+    this._pendingStripRotation = 0;
     this._pendingZoneName = "";
     this._pendingZoneHue = 30;
     this._pendingZoneSaturation = 70;
@@ -464,14 +487,21 @@ class AlexLightStudioPanel extends HTMLElement {
     this._roomName = room.name;
     this._points = room.points.map((p) => ({ x: p.x, y: p.y }));
     this._closed = this._points.length >= 3;
-    // height/direction/light_type/importance/power : repli sur des valeurs
-    // par defaut pour les pieces enregistrees avant l'ajout de ces champs.
+    // Une piece deja tracee s'ouvre directement en vue 3D -- l'edition du
+    // contour est une action explicite (bouton "Modifier le contour").
+    this._editingOutline = !this._closed;
+    // height/direction/light_type/importance/power/is_strip/... : repli sur
+    // des valeurs par defaut pour les pieces enregistrees avant l'ajout de
+    // ces champs.
     this._lights = room.lights.map((l) => ({
       height: 2.2,
       direction: "direct",
       light_type: "color",
       importance: 0.7,
       power: 1.0,
+      is_strip: false,
+      length: 1.2,
+      strip_rotation: 0,
       ...l,
     }));
     this._zones = (room.zones || []).map((z) => ({
@@ -581,6 +611,18 @@ class AlexLightStudioPanel extends HTMLElement {
         .light-item .del-btn { margin-left: auto; cursor: pointer; opacity: .6; }
         .light-item .del-btn:hover { opacity: 1; }
         .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+        /* --- Onglets de placement (Lumière/Zone/Meuble) -- un seul bloc
+         * visuel (selecteur + contenu) plutot que plusieurs cartes
+         * separees, pour eviter l'impression d'options eparpillees. */
+        .seg-tabs { display: flex; gap: 6px; margin-bottom: 16px; }
+        .seg-tab {
+          flex: 1; padding: 9px 8px; border-radius: 8px; text-align: center;
+          font-size: 13px; font-weight: 600; cursor: pointer;
+          background: transparent; color: var(--secondary-text-color);
+          border: 1px solid var(--divider-color, #444);
+        }
+        .seg-tab.active { background: var(--primary-color, #03a9f4); color: white; border-color: transparent; }
 
         /* --- Vue Gradient (ex-Alex Gradient Studio) -------------------- */
         .stops-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
@@ -703,7 +745,7 @@ class AlexLightStudioPanel extends HTMLElement {
         </div>
 
         <div class="content" id="room-scene-content">
-          <div class="card">
+          <div class="card" id="outline-card">
             <h2>Plan de la pièce</h2>
             <div class="row" id="room-name-row">
               <label>Nom</label>
@@ -718,12 +760,17 @@ class AlexLightStudioPanel extends HTMLElement {
             <div class="actions" style="margin-top:10px;" id="outline-actions">
               <button class="btn btn-outline" id="undo-point-btn">Annuler le dernier point</button>
               <button class="btn btn-outline" id="reset-outline-btn">Recommencer le contour</button>
+              <button class="btn btn-primary" id="validate-outline-btn" style="display:none;">Passer à la vue 3D</button>
             </div>
-            <div class="row" id="room-height-row" style="display:none;margin-top:14px;">
+          </div>
+
+          <div class="card" id="view3d-card" style="display:none;margin-top:20px;">
+            <h2>Vue 3D</h2>
+            <div class="row" id="room-height-row">
               <label>Hauteur plafond (m)</label>
               <input type="number" id="room-height-input" min="1.8" max="6" step="0.05" value="2.5" />
             </div>
-            <details id="room-scale-details" style="display:none;">
+            <details id="room-scale-details">
               <summary style="cursor:pointer;font-size:12px;color:var(--secondary-text-color);">Échelle avancée</summary>
               <div class="row" style="margin-top:8px;">
                 <label>Pixels / mètre</label>
@@ -735,156 +782,163 @@ class AlexLightStudioPanel extends HTMLElement {
                 pour une nouvelle pièce.
               </div>
             </details>
-          </div>
-
-          <div class="card" id="view3d-card" style="display:none;margin-top:20px;">
-            <h2>Vue 3D</h2>
-            <div id="threed-wrap" style="position:relative;border-radius:10px;overflow:hidden;background:#0b0b0f;border:1px solid var(--divider-color,#444);">
+            <div id="threed-wrap" style="position:relative;border-radius:10px;overflow:hidden;background:#0b0b0f;border:1px solid var(--divider-color,#444);margin-top:10px;">
               <canvas id="threed-canvas" style="display:block;width:100%;height:440px;touch-action:none;"></canvas>
               <div id="threed-loading" class="hint" style="position:absolute;top:8px;left:8px;margin:0;">Chargement…</div>
             </div>
             <div class="actions" style="margin-top:10px;">
               <button class="btn btn-outline" id="threed-topview-btn">Vue de dessus</button>
+              <button class="btn btn-outline" id="edit-outline-btn">Modifier le contour</button>
             </div>
             <div class="hint" id="threed-hint">
               Glisser : orbiter. Molette : zoom. Glisser avec Maj (Shift) : déplacer la vue. Clique au sol
-              dans le contour pour placer l'élément choisi ci-dessous ; glisse un objet déjà placé pour le
-              repositionner.
+              pour placer l'élément choisi ci-dessous (lumière/zone/meuble) ; glisse un objet déjà placé
+              pour le repositionner.
             </div>
           </div>
 
           <div id="view-room">
 
-          <div class="card" id="placement-mode-card" style="display:none;">
-            <h2>Que place le clic dans le contour ?</h2>
-            <div class="row">
-              <label>Mode</label>
-              <select id="placement-mode-select">
-                <option value="light">Une lumière</option>
-                <option value="zone">Une zone</option>
-                <option value="furniture">Un meuble</option>
-              </select>
+          <div class="card" id="placement-card" style="display:none;margin-top:20px;">
+            <h2>Ajouter à la pièce</h2>
+            <div class="seg-tabs" id="placement-mode-tabs">
+              <button type="button" class="seg-tab" data-mode="light">Lumière</button>
+              <button type="button" class="seg-tab" data-mode="zone">Zone</button>
+              <button type="button" class="seg-tab" data-mode="furniture">Meuble</button>
+            </div>
+
+            <div class="placement-fields" id="fields-light">
+              <div class="row">
+                <label>Lumière</label>
+                <select id="entity-select"></select>
+              </div>
+              <div class="row">
+                <label>Couleur/Blanc</label>
+                <select id="light-type-select">
+                  <option value="color">Couleur (RGB)</option>
+                  <option value="white">Blanc uniquement</option>
+                </select>
+              </div>
+              <div class="row">
+                <label>Type</label>
+                <select id="mount-select">
+                  <option value="ceiling">Plafond</option>
+                  <option value="wall">Mur</option>
+                  <option value="desk">Bureau</option>
+                </select>
+              </div>
+              <div class="row">
+                <label>Importance</label>
+                <input type="range" id="importance-input" min="0" max="1" step="0.1" value="0.7" />
+              </div>
+              <div class="row">
+                <label>Puissance</label>
+                <input type="range" id="power-input" min="0.1" max="3" step="0.1" value="1.0" />
+              </div>
+              <div class="row">
+                <label>Hauteur (m)</label>
+                <input type="number" id="height-input" min="0" max="10" step="0.1" value="2.2" />
+              </div>
+              <div class="row">
+                <label>Direction</label>
+                <select id="direction-select">
+                  <option value="direct">Direct</option>
+                  <option value="indirect">Indirect</option>
+                </select>
+              </div>
+              <div class="row">
+                <label>Bandeau LED</label>
+                <input type="checkbox" id="strip-toggle" />
+              </div>
+              <div id="strip-fields" style="display:none;">
+                <div class="row">
+                  <label>Longueur (m)</label>
+                  <input type="number" id="strip-length-input" min="0.1" max="10" step="0.1" value="1.2" />
+                </div>
+                <div class="row">
+                  <label>Orientation</label>
+                  <input type="range" id="strip-rotation-input" min="0" max="359" step="5" value="0" />
+                </div>
+              </div>
+              <div class="row">
+                <label>Rôle calculé</label>
+                <span id="derived-role-preview" style="font-weight:600;"></span>
+              </div>
+              <div class="hint">
+                Le <strong>rôle</strong> (principale/accentuation/ambiance) se déduit automatiquement du type
+                de montage et de la direction — pas besoin de le choisir toi-même. La <strong>puissance</strong>
+                (1.0 = référence) réduit automatiquement la consigne d'une lumière plus capable qu'une autre,
+                pour un rendu équivalent. Active <strong>Bandeau LED</strong> pour un ruban/bandeau (affiché
+                comme un segment orienté, pas un simple point) plutôt qu'une ampoule. Choisis tes réglages
+                ci-dessus, puis clique au sol dans la vue 3D pour placer la lumière ; glisse-la ensuite pour
+                la repositionner.
+              </div>
+              <div id="lights-list" style="margin-top:12px;"></div>
+            </div>
+
+            <div class="placement-fields" id="fields-zone" style="display:none;">
+              <div class="row">
+                <label>Nom</label>
+                <input type="text" id="zone-name" placeholder="ex. Mur TV, Coin lecture" />
+              </div>
+              <div class="row">
+                <label>Teinte</label>
+                <input type="range" id="zone-hue-input" min="0" max="360" value="30" />
+              </div>
+              <div class="row">
+                <label>Saturation</label>
+                <input type="range" id="zone-sat-input" min="0" max="100" value="70" />
+              </div>
+              <div class="row">
+                <label>Portée</label>
+                <input type="range" id="zone-radius-input" min="20" max="400" value="150" />
+              </div>
+              <div class="row">
+                <label>Hauteur (m)</label>
+                <input type="number" id="zone-height-input" min="0" max="6" step="0.1" value="1.2" />
+              </div>
+              <div class="hint">
+                Une zone influence les lumières proches vers sa teinte — l'influence décroît avec la distance
+                <strong>3D réelle</strong> (position ET hauteur) et s'annule à la portée choisie. Donne un nom
+                à la zone ci-dessus, choisis sa hauteur (ex. hauteur d'écran pour un mur TV), puis clique au
+                sol dans la vue 3D pour la placer. Une fois placée, glisse-la pour la repositionner.
+              </div>
+              <div id="zones-list" style="margin-top:12px;"></div>
+            </div>
+
+            <div class="placement-fields" id="fields-furniture" style="display:none;">
+              <div class="row">
+                <label>Type</label>
+                <select id="furniture-type-select"></select>
+              </div>
+              <div class="row">
+                <label>Largeur (m)</label>
+                <input type="number" id="furniture-width-input" min="0.1" max="4" step="0.05" />
+              </div>
+              <div class="row">
+                <label>Profondeur (m)</label>
+                <input type="number" id="furniture-depth-input" min="0.1" max="4" step="0.05" />
+              </div>
+              <div class="row">
+                <label>Hauteur (m)</label>
+                <input type="number" id="furniture-height-input" min="0.1" max="3" step="0.05" />
+              </div>
+              <div class="row">
+                <label>Élévation (m)</label>
+                <input type="number" id="furniture-elevation-input" min="0" max="3" step="0.05" />
+              </div>
+              <div class="hint">
+                Choisis un type ci-dessus (les dimensions se pré-remplissent, modifiables), puis clique au sol
+                dans la vue 3D pour le placer. Glisse-le pour le repositionner ; rotation et suppression se
+                font dans la liste ci-dessous. Un canapé/fauteuil/lit crée automatiquement une ambiance chaude
+                à proximité, une TV/un moniteur une lumière tamisée et plus froide (anti-éblouissement) — en
+                plus des zones manuelles, jamais à leur place.
+              </div>
+              <div id="furniture-list" style="margin-top:12px;"></div>
             </div>
           </div>
 
-          <div class="card" id="lights-card" style="display:none;margin-top:20px;">
-            <h2>Positionner les lumières</h2>
-            <div class="row">
-              <label>Lumière</label>
-              <select id="entity-select"></select>
-            </div>
-            <div class="row">
-              <label>Couleur/Blanc</label>
-              <select id="light-type-select">
-                <option value="color">Couleur (RGB)</option>
-                <option value="white">Blanc uniquement</option>
-              </select>
-            </div>
-            <div class="row">
-              <label>Type</label>
-              <select id="mount-select">
-                <option value="ceiling">Plafond</option>
-                <option value="wall">Mur</option>
-                <option value="desk">Bureau</option>
-              </select>
-            </div>
-            <div class="row">
-              <label>Importance</label>
-              <input type="range" id="importance-input" min="0" max="1" step="0.1" value="0.7" />
-            </div>
-            <div class="row">
-              <label>Puissance</label>
-              <input type="range" id="power-input" min="0.1" max="3" step="0.1" value="1.0" />
-            </div>
-            <div class="row">
-              <label>Hauteur (m)</label>
-              <input type="number" id="height-input" min="0" max="10" step="0.1" value="2.2" />
-            </div>
-            <div class="row">
-              <label>Direction</label>
-              <select id="direction-select">
-                <option value="direct">Direct</option>
-                <option value="indirect">Indirect</option>
-              </select>
-            </div>
-            <div class="row">
-              <label>Rôle calculé</label>
-              <span id="derived-role-preview" style="font-weight:600;"></span>
-            </div>
-            <div class="hint">
-              Le <strong>rôle</strong> (principale/accentuation/ambiance) se déduit automatiquement du type
-              de montage et de la direction — pas besoin de le choisir toi-même. La <strong>puissance</strong>
-              (1.0 = référence) réduit automatiquement la consigne d'une lumière plus capable qu'une autre,
-              pour un rendu équivalent. Choisis tes réglages ci-dessus, puis clique dans le contour pour
-              placer la lumière. Une fois placée, glisse-la directement dans le plan pour la repositionner.
-            </div>
-            <div id="lights-list" style="margin-top:12px;"></div>
-          </div>
-
-          <div class="card" id="zones-card" style="display:none;">
-            <h2>Zones (ancrages chromatiques)</h2>
-            <div class="row">
-              <label>Nom</label>
-              <input type="text" id="zone-name" placeholder="ex. Mur TV, Coin lecture" />
-            </div>
-            <div class="row">
-              <label>Teinte</label>
-              <input type="range" id="zone-hue-input" min="0" max="360" value="30" />
-            </div>
-            <div class="row">
-              <label>Saturation</label>
-              <input type="range" id="zone-sat-input" min="0" max="100" value="70" />
-            </div>
-            <div class="row">
-              <label>Portée</label>
-              <input type="range" id="zone-radius-input" min="20" max="400" value="150" />
-            </div>
-            <div class="row">
-              <label>Hauteur (m)</label>
-              <input type="number" id="zone-height-input" min="0" max="6" step="0.1" value="1.2" />
-            </div>
-            <div class="hint">
-              Une zone influence les lumières proches vers sa teinte — l'influence décroît avec la distance
-              <strong>3D réelle</strong> (position ET hauteur) et s'annule à la portée choisie. Donne un nom à la zone
-              ci-dessus, choisis sa hauteur (ex. hauteur d'écran pour un mur TV), puis clique dans le contour
-              (ou dans la vue 3D) pour la placer. Une fois placée, glisse-la pour la repositionner.
-            </div>
-            <div id="zones-list" style="margin-top:12px;"></div>
-          </div>
-
-          <div class="card" id="furniture-card" style="display:none;">
-            <h2>Meubles</h2>
-            <div class="row">
-              <label>Type</label>
-              <select id="furniture-type-select"></select>
-            </div>
-            <div class="row">
-              <label>Largeur (m)</label>
-              <input type="number" id="furniture-width-input" min="0.1" max="4" step="0.05" />
-            </div>
-            <div class="row">
-              <label>Profondeur (m)</label>
-              <input type="number" id="furniture-depth-input" min="0.1" max="4" step="0.05" />
-            </div>
-            <div class="row">
-              <label>Hauteur (m)</label>
-              <input type="number" id="furniture-height-input" min="0.1" max="3" step="0.05" />
-            </div>
-            <div class="row">
-              <label>Élévation (m)</label>
-              <input type="number" id="furniture-elevation-input" min="0" max="3" step="0.05" />
-            </div>
-            <div class="hint">
-              Choisis un type ci-dessus (les dimensions se pré-remplissent, modifiables), puis clique au sol
-              dans le contour (vue 3D) pour le placer. Glisse-le pour le repositionner ; rotation et
-              suppression se font dans la liste ci-dessous. Un canapé/fauteuil/lit crée automatiquement une
-              ambiance chaude à proximité, une TV/un moniteur une lumière tamisée et plus froide (anti-
-              éblouissement) — en plus des zones manuelles, jamais à leur place.
-            </div>
-            <div id="furniture-list" style="margin-top:12px;"></div>
-          </div>
-
-          <div class="actions">
+          <div class="actions" id="save-room-actions">
             <button class="btn btn-primary" id="save-room-btn">Enregistrer la pièce</button>
           </div>
 
@@ -1036,6 +1090,7 @@ class AlexLightStudioPanel extends HTMLElement {
     this.shadowRoot.querySelector("#reset-outline-btn").addEventListener("click", () => {
       this._points = [];
       this._closed = false;
+      this._editingOutline = true;
       this._lights = [];
       this._zones = [];
       this._furniture = [];
@@ -1083,11 +1138,31 @@ class AlexLightStudioPanel extends HTMLElement {
       this._pendingDirection = ev.target.value;
       this._updateDerivedRolePreview();
     });
-    this.shadowRoot.querySelector("#placement-mode-select").addEventListener("change", (ev) => {
-      this._placementMode = ev.target.value;
-      this.shadowRoot.querySelector("#lights-card").style.display = this._placementMode === "light" ? "block" : "none";
-      this.shadowRoot.querySelector("#zones-card").style.display = this._placementMode === "zone" ? "block" : "none";
-      this.shadowRoot.querySelector("#furniture-card").style.display = this._placementMode === "furniture" ? "block" : "none";
+    this.shadowRoot.querySelectorAll("#placement-mode-tabs .seg-tab").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        this._placementMode = btn.getAttribute("data-mode");
+        this._updatePlacementTabsUI();
+      });
+    });
+    this.shadowRoot.querySelector("#strip-toggle").addEventListener("change", (ev) => {
+      this._pendingIsStrip = ev.target.checked;
+      this.shadowRoot.querySelector("#strip-fields").style.display = this._pendingIsStrip ? "block" : "none";
+    });
+    this.shadowRoot.querySelector("#strip-length-input").addEventListener("input", (ev) => {
+      const v = parseFloat(ev.target.value);
+      this._pendingStripLength = Number.isFinite(v) && v > 0 ? v : 1.2;
+    });
+    this.shadowRoot.querySelector("#strip-rotation-input").addEventListener("input", (ev) => {
+      const v = parseFloat(ev.target.value);
+      this._pendingStripRotation = Number.isFinite(v) ? v : 0;
+    });
+    this.shadowRoot.querySelector("#validate-outline-btn").addEventListener("click", () => {
+      this._editingOutline = false;
+      this._renderCanvas();
+    });
+    this.shadowRoot.querySelector("#edit-outline-btn").addEventListener("click", () => {
+      this._editingOutline = true;
+      this._renderCanvas();
     });
     this.shadowRoot.querySelector("#zone-name").addEventListener("input", (ev) => {
       this._pendingZoneName = ev.target.value;
@@ -1144,6 +1219,7 @@ class AlexLightStudioPanel extends HTMLElement {
     });
     this.shadowRoot.querySelector("#threed-topview-btn").addEventListener("click", () => this._threeResetCameraTopView());
     this._syncFurnitureFormInputs();
+    this._updatePlacementTabsUI();
     this.shadowRoot.querySelector("#save-room-btn").addEventListener("click", () => this._saveRoom());
     this._updateDerivedRolePreview();
 
@@ -1213,7 +1289,6 @@ class AlexLightStudioPanel extends HTMLElement {
     const viewScene = this.shadowRoot.querySelector("#view-scene");
     const newRoomBtn = this.shadowRoot.querySelector("#new-room-btn");
     const roomNameRow = this.shadowRoot.querySelector("#room-name-row");
-    const outlineActions = this.shadowRoot.querySelector("#outline-actions");
     const navGradientBtn = this.shadowRoot.querySelector("#nav-gradient-btn");
     const navLightzoneBtn = this.shadowRoot.querySelector("#nav-lightzone-btn");
     const navRoomBtn = this.shadowRoot.querySelector("#nav-room-btn");
@@ -1229,7 +1304,6 @@ class AlexLightStudioPanel extends HTMLElement {
     if (viewScene) viewScene.style.display = view === "scene" ? "block" : "none";
     if (newRoomBtn) newRoomBtn.style.display = view === "room" ? "inline-block" : "none";
     if (roomNameRow) roomNameRow.style.display = view === "room" ? "flex" : "none";
-    if (outlineActions) outlineActions.style.display = view === "room" ? "flex" : "none";
     if (navGradientBtn) navGradientBtn.style.background = view === "gradient" ? "var(--primary-color, #03a9f4)" : "transparent";
     if (navLightzoneBtn) navLightzoneBtn.style.background = view === "lightzone" ? "var(--primary-color, #03a9f4)" : "transparent";
     if (navRoomBtn) navRoomBtn.style.background = view === "room" ? "var(--primary-color, #03a9f4)" : "transparent";
@@ -1261,6 +1335,21 @@ class AlexLightStudioPanel extends HTMLElement {
     if (!el) return;
     const role = deriveRole(this._pendingMountType, this._pendingDirection);
     el.textContent = ROLE_LABELS[role] || role;
+  }
+
+  // Un seul bloc "Ajouter à la pièce" avec des onglets (lumière/zone/meuble)
+  // plutot que plusieurs cartes independantes -- l'onglet actif determine a
+  // la fois le style du bouton et le groupe de champs affiche.
+  _updatePlacementTabsUI() {
+    this.shadowRoot.querySelectorAll("#placement-mode-tabs .seg-tab").forEach((btn) => {
+      btn.classList.toggle("active", btn.getAttribute("data-mode") === this._placementMode);
+    });
+    const fieldsLight = this.shadowRoot.querySelector("#fields-light");
+    if (fieldsLight) fieldsLight.style.display = this._placementMode === "light" ? "block" : "none";
+    const fieldsZone = this.shadowRoot.querySelector("#fields-zone");
+    if (fieldsZone) fieldsZone.style.display = this._placementMode === "zone" ? "block" : "none";
+    const fieldsFurniture = this.shadowRoot.querySelector("#fields-furniture");
+    if (fieldsFurniture) fieldsFurniture.style.display = this._placementMode === "furniture" ? "block" : "none";
   }
 
   _populateEntitySelect() {
@@ -1297,14 +1386,17 @@ class AlexLightStudioPanel extends HTMLElement {
     return { x: transformed.x, y: transformed.y };
   }
 
+  // Uniquement le trace/l'edition du CONTOUR -- le placement des lumieres/
+  // zones/meubles se fait exclusivement dans la vue 3D (_onThreePointerUp),
+  // jamais dans ce plan 2D (voir _editingOutline : les deux vues ne sont
+  // jamais affichees en meme temps).
   _onCanvasClick(ev) {
-    // Plan en lecture seule en vue Scene -- l'edition (contour/lumieres/
-    // zones) ne se fait qu'en vue Room.
     if (this._activeView !== "room") return;
+    if (!this._editingOutline) return;
 
     // Un clic qui suit immediatement un glisser-depose ne doit pas EN PLUS
-    // ajouter un point ou placer une lumiere -- sans ce garde-fou, relacher
-    // le glissement declenche aussi un "click" fantome au meme endroit.
+    // ajouter un point -- sans ce garde-fou, relacher le glissement
+    // declenche aussi un "click" fantome au meme endroit.
     if (this._justDragged) {
       this._justDragged = false;
       return;
@@ -1312,67 +1404,32 @@ class AlexLightStudioPanel extends HTMLElement {
 
     const p = this._svgPointFromEvent(ev);
 
-    if (!this._closed) {
-      // Mode dessin du contour : clic pres du premier point -> ferme.
-      if (this._points.length >= 3 && distance(p, this._points[0]) <= CLOSE_THRESHOLD) {
-        this._closed = true;
-        this._renderCanvas();
-        this._renderLightsList();
-        return;
-      }
-      this._points.push({ x: snapToGrid(p.x), y: snapToGrid(p.y) });
+    if (this._points.length >= 3 && distance(p, this._points[0]) <= CLOSE_THRESHOLD) {
+      // Clic pres du premier point -> ferme le contour et bascule sur la
+      // vue 3D (seule la premiere fermeture le fait automatiquement ;
+      // rouvrir ensuite se fait via le bouton "Modifier le contour").
+      this._closed = true;
+      this._editingOutline = false;
       this._renderCanvas();
+      this._renderLightsList();
       return;
     }
-
-    // Mode placement : lumiere ou zone selon le selecteur, seulement a
-    // l'interieur du contour.
-    if (!pointInPolygon(p, this._points)) return;
-
-    if (this._placementMode === "zone") {
-      if (!this._pendingZoneName.trim()) {
-        this.shadowRoot.querySelector("#zone-name").focus();
-        return;
-      }
-      this._zones.push({
-        name: this._pendingZoneName.trim(),
-        x: p.x,
-        y: p.y,
-        hue: this._pendingZoneHue,
-        saturation: this._pendingZoneSaturation,
-        influence_radius: this._pendingZoneRadius,
-      });
-      this._renderCanvas();
-      this._renderZonesList();
-      return;
-    }
-
-    if (!this._pendingEntity) return;
-    this._lights.push({
-      entity_id: this._pendingEntity,
-      x: p.x,
-      y: p.y,
-      mount_type: this._pendingMountType,
-      height: this._pendingHeight,
-      direction: this._pendingDirection,
-      light_type: this._pendingLightType,
-      importance: this._pendingImportance,
-      power: this._pendingPower,
-    });
+    this._points.push({ x: snapToGrid(p.x), y: snapToGrid(p.y) });
     this._renderCanvas();
-    this._renderLightsList();
   }
 
   // -----------------------------------------------------------------------
-  // Glisser-depose des points de mur et des lumieres deja places. pointerdown
-  // demarre sur le marqueur lui-meme (attache apres chaque rendu, voir
-  // _renderCanvas) ; pointermove/pointerup sont sur le SVG entier pour ne
-  // pas perdre le geste si le curseur sort brievement du marqueur.
+  // Glisser-depose des points de mur (seuls elements encore edites dans le
+  // plan 2D -- lumieres/zones/meubles se glissent desormais dans la vue 3D).
+  // pointerdown demarre sur le marqueur lui-meme (attache apres chaque
+  // rendu, voir _renderCanvas) ; pointermove/pointerup sont sur le SVG
+  // entier pour ne pas perdre le geste si le curseur sort brievement du
+  // marqueur.
   // -----------------------------------------------------------------------
   _onMarkerPointerDown(ev, kind, index) {
-    if (this._activeView !== "room") return;
+    if (this._activeView !== "room" || !this._editingOutline) return;
     ev.stopPropagation();
-    const source = kind === "point" ? this._points[index] : kind === "zone" ? this._zones[index] : this._lights[index];
+    const source = this._points[index];
     this._dragging = { kind, index, startX: source.x, startY: source.y, moved: false };
   }
 
@@ -1380,80 +1437,63 @@ class AlexLightStudioPanel extends HTMLElement {
     if (!this._dragging) return;
     const p = this._svgPointFromEvent(ev);
     this._dragging.moved = true;
-    if (this._dragging.kind === "point") {
-      this._points[this._dragging.index] = { x: snapToGrid(p.x), y: snapToGrid(p.y) };
-    } else if (this._dragging.kind === "zone") {
-      this._zones[this._dragging.index].x = p.x;
-      this._zones[this._dragging.index].y = p.y;
-    } else {
-      this._lights[this._dragging.index].x = p.x;
-      this._lights[this._dragging.index].y = p.y;
-    }
+    this._points[this._dragging.index] = { x: snapToGrid(p.x), y: snapToGrid(p.y) };
     this._renderCanvas();
   }
 
   _onCanvasPointerUp() {
     if (!this._dragging) return;
-    const { kind, index, startX, startY, moved } = this._dragging;
-    if ((kind === "light" || kind === "zone") && moved) {
-      // Une lumiere ou une zone deposee hors du contour revient a sa
-      // position de depart plutot que d'accepter une position invalide.
-      const item = kind === "zone" ? this._zones[index] : this._lights[index];
-      if (!pointInPolygon(item, this._points)) {
-        item.x = startX;
-        item.y = startY;
-      }
-    }
-    this._justDragged = moved;
+    this._justDragged = this._dragging.moved;
     this._dragging = null;
     this._renderCanvas();
-    if (kind === "zone") {
-      this._renderZonesList();
-    } else {
-      this._renderLightsList();
-    }
   }
 
   _renderCanvas() {
     const svg = this.shadowRoot.querySelector("#plan");
     if (!svg) return;
 
-    // Rayons des poignees (points de mur/zones/lumieres) adaptes a l'echelle
-    // REELLE de rendu du plan, pas seulement a la largeur de la fenetre --
-    // le viewBox reste fixe (${VIEWBOX_W}x${VIEWBOX_H}) mais le plan peut
-    // s'afficher bien plus compresse sur un telephone qu'en desktop. Sans
-    // ca, un rayon de 7-10 unites devient quelques pixels a peine des que
-    // le plan est compresse a moins de la moitie de sa largeur de
-    // conception, rendant les poignees quasi impossibles a toucher.
+    // Rayon des poignees de mur, adapte a l'echelle REELLE de rendu du plan,
+    // pas seulement a la largeur de la fenetre -- le viewBox reste fixe
+    // (${VIEWBOX_W}x${VIEWBOX_H}) mais le plan peut s'afficher bien plus
+    // compresse sur un telephone qu'en desktop. Sans ca, un rayon de
+    // 7-9 unites devient quelques pixels a peine des que le plan est
+    // compresse a moins de la moitie de sa largeur de conception, rendant
+    // les poignees quasi impossibles a toucher.
     const svgRect = svg.getBoundingClientRect();
     const renderScale = svgRect.width > 0 ? svgRect.width / VIEWBOX_W : 1;
     const wallPointR = Math.max(7, 9 / renderScale);
-    const zoneCenterR = Math.max(8, 10 / renderScale);
-    const lightMarkerR = Math.max(10, 12 / renderScale);
 
-    const placementModeCard = this.shadowRoot.querySelector("#placement-mode-card");
-    const lightsCard = this.shadowRoot.querySelector("#lights-card");
-    const zonesCard = this.shadowRoot.querySelector("#zones-card");
-    const sceneCard = this.shadowRoot.querySelector("#scene-card");
+    // Les deux vues (plan 2D et vue 3D) ne sont JAMAIS affichees en meme
+    // temps : le 2D sert exclusivement a tracer/ajuster le contour
+    // (_editingOutline), le 3D prend le relais pour tout le reste
+    // (positionnement lumieres/zones/meubles) des que le contour est
+    // valide -- evite d'avoir deux representations divergentes de la
+    // meme piece visibles cote a cote.
+    const showOutline2D = !this._closed || this._editingOutline;
+    const showThreeD = this._closed && !this._editingOutline;
+
+    const outlineActions = this.shadowRoot.querySelector("#outline-actions");
+    const canvasWrap = this.shadowRoot.querySelector("#canvas-wrap");
+    const validateOutlineBtn = this.shadowRoot.querySelector("#validate-outline-btn");
     const drawHint = this.shadowRoot.querySelector("#draw-hint");
-    if (placementModeCard) placementModeCard.style.display = this._closed ? "block" : "none";
-    if (lightsCard) lightsCard.style.display = this._closed && this._placementMode === "light" ? "block" : "none";
-    if (zonesCard) zonesCard.style.display = this._closed && this._placementMode === "zone" ? "block" : "none";
-    if (sceneCard) sceneCard.style.display = this._closed && this._lights.length ? "block" : "none";
-    const furnitureCard = this.shadowRoot.querySelector("#furniture-card");
-    if (furnitureCard) furnitureCard.style.display = this._closed && this._placementMode === "furniture" ? "block" : "none";
-    const roomHeightRow = this.shadowRoot.querySelector("#room-height-row");
-    if (roomHeightRow) roomHeightRow.style.display = this._closed ? "flex" : "none";
-    const roomScaleDetails = this.shadowRoot.querySelector("#room-scale-details");
-    if (roomScaleDetails) roomScaleDetails.style.display = this._closed ? "block" : "none";
-    const view3dCard = this.shadowRoot.querySelector("#view3d-card");
-    if (view3dCard) view3dCard.style.display = this._closed ? "block" : "none";
+    if (canvasWrap) canvasWrap.style.display = showOutline2D ? "block" : "none";
+    if (outlineActions) outlineActions.style.display = showOutline2D ? "flex" : "none";
+    if (validateOutlineBtn) validateOutlineBtn.style.display = this._closed && this._editingOutline ? "inline-block" : "none";
     if (drawHint) {
+      drawHint.style.display = showOutline2D ? "block" : "none";
       drawHint.textContent = this._closed
-        ? "Contour terminé. Glisse un point, une lumière ou une zone pour la repositionner ; « Recommencer le contour » pour tout retracer."
+        ? "Contour existant. Glisse un point pour l'ajuster, ou « Recommencer le contour » pour tout retracer, puis « Passer à la vue 3D »."
         : "Clique dans le plan pour placer les coins du contour (accroché à la grille). Clique près du premier point pour refermer.";
     }
-    if (this._closed && this._points.length >= 3) {
+
+    const view3dCard = this.shadowRoot.querySelector("#view3d-card");
+    if (view3dCard) view3dCard.style.display = showThreeD ? "block" : "none";
+    const placementCard = this.shadowRoot.querySelector("#placement-card");
+    if (placementCard) placementCard.style.display = showThreeD ? "block" : "none";
+    const sceneCard = this.shadowRoot.querySelector("#scene-card");
+    if (sceneCard) sceneCard.style.display = this._closed && this._lights.length ? "block" : "none";
+
+    if (showThreeD && this._points.length >= 3) {
       this._ensureThreeLoaded()
         .then(() => {
           this._initThreeScene();
@@ -1469,6 +1509,8 @@ class AlexLightStudioPanel extends HTMLElement {
       this._rebuildThreeRoom();
       this._rebuildThreeObjects();
     }
+
+    if (!showOutline2D) return; // rien a dessiner dans le SVG le temps que la vue 3D est active
 
     const pointsAttr = this._points.map((p) => `${p.x},${p.y}`).join(" ");
     const shapeEl = this._points.length
@@ -1486,48 +1528,6 @@ class AlexLightStudioPanel extends HTMLElement {
       )
       .join("");
 
-    // Zones : cercle de portee (pointille, semi-transparent) + centre plein
-    // dans la teinte de la zone -- rendu AVANT les lumieres pour qu'elles
-    // restent visibles par-dessus.
-    const zoneMarkers = this._zones
-      .map((z, i) => {
-        const css = hsvToCss(z.hue, z.saturation, 220);
-        return `
-          <g class="zone-marker" data-zone-index="${i}">
-            <circle cx="${z.x}" cy="${z.y}" r="${z.influence_radius}" fill="${css}" fill-opacity="0.08"
-                    stroke="${css}" stroke-opacity="0.5" stroke-width="1.5" stroke-dasharray="6,4" style="pointer-events:none;" />
-            <circle class="zone-center" data-zone-index="${i}" cx="${z.x}" cy="${z.y}" r="${zoneCenterR}" fill="${css}"
-                    stroke="white" stroke-width="1.5" style="cursor:grab;" />
-            <text x="${z.x}" y="${z.y - 14}" font-size="11" text-anchor="middle" fill="white" style="pointer-events:none;">${escapeHtml(z.name)}</text>
-          </g>`;
-      })
-      .join("");
-
-    // En mode apercu (une proposition vient d'etre generee), les marqueurs
-    // affichent la couleur SUGGEREE plutot que la couleur par role -- pur
-    // affichage, rien n'est envoye a aucune lumiere par ce rendu.
-    const suggestionByEntity = {};
-    if (this._previewMode && this._suggestions) {
-      this._suggestions.forEach((s) => {
-        suggestionByEntity[s.entity_id] = s;
-      });
-    }
-
-    const lightMarkers = this._lights
-      .map((l, i) => {
-        let color = l.mount_type === "ceiling" ? "#f4a935" : l.mount_type === "wall" ? "#4caf50" : "#e91e63";
-        const sug = suggestionByEntity[l.entity_id];
-        if (sug) {
-          color = sug.color_temp_kelvin != null ? kelvinToCss(sug.color_temp_kelvin) : hsvToCss(sug.hue, sug.saturation, sug.brightness);
-        }
-        return `
-          <g class="light-marker" data-light-index="${i}" style="cursor:grab;">
-            <circle cx="${l.x}" cy="${l.y}" r="${lightMarkerR}" fill="${color}" stroke="white" stroke-width="1.5" opacity="0.95" />
-            ${!sug ? `<text x="${l.x}" y="${l.y + 3}" font-size="9" text-anchor="middle" fill="white" style="pointer-events:none;">${MOUNT_TYPE_ICONS[l.mount_type] || ""}</text>` : ""}
-          </g>`;
-      })
-      .join("");
-
     // Grille de fond façon papier quadrille -- aide purement visuelle, les
     // points de mur s'accrochent en plus reellement a ce pas (snapToGrid).
     svg.innerHTML = `
@@ -1540,23 +1540,11 @@ class AlexLightStudioPanel extends HTMLElement {
       <rect x="0" y="0" width="${VIEWBOX_W}" height="${VIEWBOX_H}" fill="url(#grid)" />
       ${shapeEl}
       ${cornerDots}
-      ${zoneMarkers}
-      ${lightMarkers}
     `;
 
     svg.querySelectorAll(".wall-point").forEach((el) => {
       el.addEventListener("pointerdown", (ev) =>
         this._onMarkerPointerDown(ev, "point", parseInt(el.getAttribute("data-point-index"), 10))
-      );
-    });
-    svg.querySelectorAll(".light-marker").forEach((el) => {
-      el.addEventListener("pointerdown", (ev) =>
-        this._onMarkerPointerDown(ev, "light", parseInt(el.getAttribute("data-light-index"), 10))
-      );
-    });
-    svg.querySelectorAll(".zone-center").forEach((el) => {
-      el.addEventListener("pointerdown", (ev) =>
-        this._onMarkerPointerDown(ev, "zone", parseInt(el.getAttribute("data-zone-index"), 10))
       );
     });
   }
@@ -1575,9 +1563,10 @@ class AlexLightStudioPanel extends HTMLElement {
         const lightType = l.light_type || "color";
         const importance = l.importance != null ? l.importance : 0.7;
         const derivedRole = deriveRole(l.mount_type, l.direction || "direct");
+        const stripRotation = l.strip_rotation || 0;
         return `
           <div class="light-item" data-index="${i}" style="flex-wrap:wrap;">
-            <span>${MOUNT_TYPE_ICONS[l.mount_type] || ""}</span>
+            <span>${l.is_strip ? "▬" : MOUNT_TYPE_ICONS[l.mount_type] || ""}</span>
             <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(name)}</span>
             <span style="color:var(--secondary-text-color);">(${MOUNT_TYPE_LABELS[l.mount_type] || l.mount_type} · ${ROLE_LABELS[derivedRole]})</span>
             <select class="light-type" data-index="${i}" style="flex:0 0 90px;" title="Couleur/Blanc">
@@ -1592,6 +1581,12 @@ class AlexLightStudioPanel extends HTMLElement {
               <option value="direct" ${l.direction !== "indirect" ? "selected" : ""}>Direct</option>
               <option value="indirect" ${l.direction === "indirect" ? "selected" : ""}>Indirect</option>
             </select>
+            ${
+              l.is_strip
+                ? `<input type="range" class="light-strip-rotation" data-index="${i}" min="0" max="359" step="5"
+                     value="${stripRotation}" style="width:90px;flex:0 0 90px;" title="Orientation du bandeau (${Math.round(stripRotation)}°)" />`
+                : ""
+            }
             <span class="del-btn" data-del-index="${i}">✕</span>
           </div>`;
       })
@@ -1615,12 +1610,22 @@ class AlexLightStudioPanel extends HTMLElement {
         const idx = parseInt(el.getAttribute("data-index"), 10);
         const v = parseFloat(ev.target.value);
         this._lights[idx].height = Number.isFinite(v) ? v : 2.2;
+        this._rebuildThreeObjects();
       });
     });
     list.querySelectorAll(".light-direction").forEach((el) => {
       el.addEventListener("change", (ev) => {
         const idx = parseInt(el.getAttribute("data-index"), 10);
         this._lights[idx].direction = ev.target.value;
+      });
+    });
+    list.querySelectorAll(".light-strip-rotation").forEach((el) => {
+      el.addEventListener("input", (ev) => {
+        const idx = parseInt(el.getAttribute("data-index"), 10);
+        const v = parseFloat(ev.target.value);
+        this._lights[idx].strip_rotation = Number.isFinite(v) ? v : 0;
+        el.title = `Orientation du bandeau (${Math.round(this._lights[idx].strip_rotation)}°)`;
+        this._rebuildThreeObjects();
       });
     });
     list.querySelectorAll("[data-del-index]").forEach((el) => {
@@ -1670,6 +1675,48 @@ class AlexLightStudioPanel extends HTMLElement {
         this._renderZonesList();
       });
     });
+  }
+
+  // Place une lumiere/zone a la position (px, py) deja validee (a
+  // l'interieur du contour) -- appele depuis un clic au sol dans la vue 3D,
+  // voir _onThreePointerUp. Mêmes champs que l'ancien flux de placement 2D,
+  // simplement declenches depuis la 3D desormais.
+  _addLightAt(px, py) {
+    if (!this._pendingEntity) return;
+    this._lights.push({
+      entity_id: this._pendingEntity,
+      x: px,
+      y: py,
+      mount_type: this._pendingMountType,
+      height: this._pendingHeight,
+      direction: this._pendingDirection,
+      light_type: this._pendingLightType,
+      importance: this._pendingImportance,
+      power: this._pendingPower,
+      is_strip: this._pendingIsStrip,
+      length: this._pendingStripLength,
+      strip_rotation: this._pendingStripRotation,
+    });
+    this._rebuildThreeObjects();
+    this._renderLightsList();
+  }
+
+  _addZoneAt(px, py) {
+    if (!this._pendingZoneName.trim()) {
+      this.shadowRoot.querySelector("#zone-name").focus();
+      return;
+    }
+    this._zones.push({
+      name: this._pendingZoneName.trim(),
+      x: px,
+      y: py,
+      hue: this._pendingZoneHue,
+      saturation: this._pendingZoneSaturation,
+      influence_radius: this._pendingZoneRadius,
+      z: this._pendingZoneHeight,
+    });
+    this._rebuildThreeObjects();
+    this._renderZonesList();
   }
 
   // -----------------------------------------------------------------------
@@ -1893,6 +1940,11 @@ class AlexLightStudioPanel extends HTMLElement {
     if (!t.cameraState) this._threeFrameRoom(worldPoints);
   }
 
+  // Reconstruit TOUS les objets interactifs de la piece (lumieres, zones,
+  // meubles) -- la vue 3D est desormais la SEULE surface de placement/
+  // glisser-depose pour les trois (voir _onThreePointerDown/Up), donc
+  // chaque mesh "prenable" est tague dans t.pickableMeshes avec son
+  // {kind, index} pour que le raycaster sache quoi deplacer.
   _rebuildThreeObjects() {
     const t = this._three;
     if (!t || !window.THREE) return;
@@ -1904,25 +1956,47 @@ class AlexLightStudioPanel extends HTMLElement {
     const group = new THREE.Group();
     t.objectsGroup = group;
     t.scene.add(group);
-    t.furnitureMeshes = [];
+    t.pickableMeshes = [];
 
-    // Lumieres -- visualisation seule ici ; placement/glisser-depose restent
-    // dans le plan 2D (deja precis et testé), la 3D sert a VOIR l'espace.
-    this._lights.forEach((l) => {
+    // En mode apercu (une proposition de scene vient d'etre generee), les
+    // lumieres affichent la couleur SUGGEREE plutot que la couleur par
+    // role -- pur affichage, rien n'est envoye a aucune lumiere ici.
+    const suggestionByEntity = {};
+    if (this._previewMode && this._suggestions) {
+      this._suggestions.forEach((s) => {
+        suggestionByEntity[s.entity_id] = s;
+      });
+    }
+
+    // Lumieres -- sphere pour une ampoule ponctuelle, barre allongee et
+    // orientable pour un bandeau LED (is_strip) : un bandeau/ruban a une
+    // vraie emprise physique dans la piece, pas juste un point, d'autant
+    // plus visible/pertinent pour un bandeau gradient (plusieurs couleurs
+    // le long du meme bandeau).
+    this._lights.forEach((l, i) => {
       const world = this._worldFromPx(l.x, l.y);
-      const color = l.mount_type === "ceiling" ? 0xf4a935 : l.mount_type === "wall" ? 0x4caf50 : 0xe91e63;
-      const mesh = new THREE.Mesh(
-        new THREE.SphereGeometry(0.09, 12, 12),
-        new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.7 })
-      );
+      let colorCss = l.mount_type === "ceiling" ? "#f4a935" : l.mount_type === "wall" ? "#4caf50" : "#e91e63";
+      const sug = suggestionByEntity[l.entity_id];
+      if (sug) {
+        colorCss = sug.color_temp_kelvin != null ? kelvinToCss(sug.color_temp_kelvin) : hsvToCss(sug.hue, sug.saturation, sug.brightness);
+      }
+      const mat = new THREE.MeshStandardMaterial({ color: colorCss, emissive: colorCss, emissiveIntensity: 0.65 });
+      const mesh = l.is_strip
+        ? new THREE.Mesh(new THREE.BoxGeometry(Math.max(0.1, l.length || 1.2), 0.05, 0.08), mat)
+        : new THREE.Mesh(new THREE.SphereGeometry(0.09, 12, 12), mat);
+      if (l.is_strip) mesh.rotation.y = -((l.strip_rotation || 0) * Math.PI) / 180;
       mesh.position.set(world.x, l.height != null ? l.height : 2.2, world.z);
+      mesh.userData = { kind: "light", index: i };
       group.add(mesh);
+      t.pickableMeshes.push(mesh);
     });
 
     // Zones -- sphere translucide = portee d'influence REELLE (falloff 3D
     // cote harmony.py), rend visible ce que "harmonieux selon la position"
-    // veut dire concretement.
-    this._zones.forEach((z) => {
+    // veut dire concretement ; le petit point plein central est la poignee
+    // de glisser-depose (la grande sphere translucide n'est pas prenable,
+    // trop imprecise au clic).
+    this._zones.forEach((z, i) => {
       const world = this._worldFromPx(z.x, z.y);
       const color = new THREE.Color(hsvToCss(z.hue, z.saturation, 220));
       const radiusM = Math.max(0.05, this._toMeters(z.influence_radius != null ? z.influence_radius : 150));
@@ -1932,12 +2006,14 @@ class AlexLightStudioPanel extends HTMLElement {
       );
       sphere.position.set(world.x, z.z != null ? z.z : 1.2, world.z);
       group.add(sphere);
-      const dot = new THREE.Mesh(new THREE.SphereGeometry(0.06, 10, 10), new THREE.MeshBasicMaterial({ color }));
+      const dot = new THREE.Mesh(new THREE.SphereGeometry(0.07, 10, 10), new THREE.MeshBasicMaterial({ color }));
       dot.position.copy(sphere.position);
+      dot.userData = { kind: "zone", index: i };
       group.add(dot);
+      t.pickableMeshes.push(dot);
     });
 
-    // Meubles -- interactifs (placement/glisser-depose/rotation/suppression).
+    // Meubles.
     this._furniture.forEach((f, i) => {
       const world = this._worldFromPx(f.x, f.y);
       const catalog = FURNITURE_TYPES[f.furniture_type] || FURNITURE_TYPES.other;
@@ -1950,9 +2026,9 @@ class AlexLightStudioPanel extends HTMLElement {
       );
       mesh.position.set(world.x, (f.elevation || 0) + h / 2, world.z);
       mesh.rotation.y = -((f.rotation || 0) * Math.PI) / 180;
-      mesh.userData.furnitureIndex = i;
+      mesh.userData = { kind: "furniture", index: i };
       group.add(mesh);
-      t.furnitureMeshes.push(mesh);
+      t.pickableMeshes.push(mesh);
     });
   }
 
@@ -2007,12 +2083,21 @@ class AlexLightStudioPanel extends HTMLElement {
     return hit ? point : null;
   }
 
-  _threePickFurniture(ndc) {
+  // Renvoie {kind, index} du premier objet "prenable" (lumiere/zone/meuble)
+  // sous le curseur, ou null -- la vue 3D est la SEULE surface de placement/
+  // glisser-depose pour les trois types, donc pointerdown doit d'abord
+  // determiner si on saisit un objet existant avant de decider si le geste
+  // est plutot une orbite/un pan de camera.
+  _threePickObject(ndc) {
     const t = this._three;
-    if (!t.furnitureMeshes || !t.furnitureMeshes.length) return null;
+    if (!t.pickableMeshes || !t.pickableMeshes.length) return null;
     t.raycaster.setFromCamera(ndc, t.camera);
-    const hits = t.raycaster.intersectObjects(t.furnitureMeshes, false);
-    return hits.length ? hits[0].object.userData.furnitureIndex : null;
+    const hits = t.raycaster.intersectObjects(t.pickableMeshes, false);
+    return hits.length ? hits[0].object.userData : null;
+  }
+
+  _threeArrayForKind(kind) {
+    return kind === "light" ? this._lights : kind === "zone" ? this._zones : this._furniture;
   }
 
   _onThreePointerDown(ev) {
@@ -2021,11 +2106,12 @@ class AlexLightStudioPanel extends HTMLElement {
     if (!t) return;
     ev.currentTarget.setPointerCapture(ev.pointerId);
     const ndc = this._threePointerFromEvent(ev);
-    const furnitureIndex = this._activeView === "room" ? this._threePickFurniture(ndc) : null;
-    const item = furnitureIndex != null ? this._furniture[furnitureIndex] : null;
+    const picked = this._activeView === "room" ? this._threePickObject(ndc) : null;
+    const item = picked ? this._threeArrayForKind(picked.kind)[picked.index] : null;
     this._threeDrag = {
-      mode: furnitureIndex != null ? "furniture" : ev.shiftKey ? "pan" : "orbit",
-      furnitureIndex,
+      mode: item ? "move" : ev.shiftKey ? "pan" : "orbit",
+      kind: picked ? picked.kind : null,
+      index: picked ? picked.index : null,
       startClientX: ev.clientX,
       startClientY: ev.clientY,
       lastClientX: ev.clientX,
@@ -2046,12 +2132,13 @@ class AlexLightStudioPanel extends HTMLElement {
     drag.lastClientX = ev.clientX;
     drag.lastClientY = ev.clientY;
 
-    if (drag.mode === "furniture") {
+    if (drag.mode === "move") {
       const hit = this._threeIntersectFloor(this._threePointerFromEvent(ev));
       if (hit) {
         const px = this._pxFromWorld(hit.x, hit.z);
-        this._furniture[drag.furnitureIndex].x = px.x;
-        this._furniture[drag.furnitureIndex].y = px.y;
+        const item = this._threeArrayForKind(drag.kind)[drag.index];
+        item.x = px.x;
+        item.y = px.y;
         this._rebuildThreeObjects();
       }
       return;
@@ -2077,6 +2164,12 @@ class AlexLightStudioPanel extends HTMLElement {
     }
   }
 
+  _threeRenderListForKind(kind) {
+    if (kind === "light") this._renderLightsList();
+    else if (kind === "zone") this._renderZonesList();
+    else if (kind === "furniture") this._renderFurnitureList();
+  }
+
   _onThreePointerUp(ev) {
     const drag = this._threeDrag;
     this._threeDrag = null;
@@ -2090,23 +2183,27 @@ class AlexLightStudioPanel extends HTMLElement {
       }
     }
 
-    if (drag.mode === "furniture") {
-      const item = this._furniture[drag.furnitureIndex];
+    if (drag.mode === "move") {
+      const item = this._threeArrayForKind(drag.kind)[drag.index];
       if (item && drag.moved && !pointInPolygon(item, this._points)) {
+        // Un objet depose hors du contour revient a sa position de depart
+        // plutot que d'accepter une position invalide.
         item.x = drag.startX;
         item.y = drag.startY;
         this._rebuildThreeObjects();
       }
-      this._renderFurnitureList();
+      this._threeRenderListForKind(drag.kind);
       return;
     }
 
-    if (!drag.moved && this._activeView === "room" && this._placementMode === "furniture" && this._closed) {
+    if (!drag.moved && this._activeView === "room" && this._closed) {
       const hit = this._threeIntersectFloor(this._threePointerFromEvent(ev));
       if (hit) {
         const px = this._pxFromWorld(hit.x, hit.z);
         if (pointInPolygon(px, this._points)) {
-          this._addFurnitureAt(px.x, px.y);
+          if (this._placementMode === "furniture") this._addFurnitureAt(px.x, px.y);
+          else if (this._placementMode === "zone") this._addZoneAt(px.x, px.y);
+          else this._addLightAt(px.x, px.y);
         }
       }
     }
