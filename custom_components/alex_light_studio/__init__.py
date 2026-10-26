@@ -40,7 +40,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 
 import voluptuous as vol
-from homeassistant.components import panel_custom, websocket_api
+from homeassistant.components import mqtt, panel_custom, websocket_api
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
@@ -358,6 +358,45 @@ _SNAPSHOT_COLOR_ATTR = {
 }
 
 
+Z2M_BASE_TOPIC = "zigbee2mqtt"
+
+
+def _z2m_name_for(state) -> str:
+    """Nom Z2M d'une entite (meme regle que load_scene : friendly_name HA,
+    sinon dernier segment de l'entity_id)."""
+    return state.attributes.get("friendly_name") or state.entity_id.split(".", 1)[1]
+
+
+def _track_segments(cache: dict, topic: str, payload) -> None:
+    """Memorise le dernier degrade connu par appareil Z2M, observe sur MQTT
+    (HA ne l'expose dans aucun attribut ; les Aqara ne le rapportent pas
+    du tout). Sources : tout message /set contenant segment_colors/gradient
+    (panel, load_scene, zones, automatisations...) et, pour les Hue, l'etat
+    rapporte par l'appareil. Un /set de couleur sans segments (ex. un
+    light.turn_on classique) invalide le degrade memorise."""
+    if not topic.startswith(f"{Z2M_BASE_TOPIC}/") or topic.startswith(f"{Z2M_BASE_TOPIC}/bridge"):
+        return
+    try:
+        data = json.loads(payload)
+    except (TypeError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    is_set = topic.endswith("/set")
+    name = topic[len(Z2M_BASE_TOPIC) + 1 :]
+    if is_set:
+        name = name[: -len("/set")]
+    elif topic.endswith("/get") or topic.endswith("/availability"):
+        return
+    key = name.lower()
+    if isinstance(data.get("segment_colors"), list):
+        cache[key] = {"segment_colors": data["segment_colors"]}
+    elif isinstance(data.get("gradient"), list) and data["gradient"]:
+        cache[key] = {"gradient": data["gradient"]}
+    elif is_set and any(k in data for k in ("color", "color_temp", "color_mode")):
+        cache.pop(key, None)
+
+
 def _capture_snapshot_entity(state, include_effects: bool) -> dict:
     """Etat rejouable d'une entite. `effect` n'est memorise que sur demande :
     c'est lui qui relance un effet (Aqara...) au rechargement d'une scene."""
@@ -418,6 +457,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass, entry.entry_id, strip_id, brightness, source_zone_id
         ),
     }
+
+    segment_cache: dict = hass.data[DOMAIN].setdefault("segment_cache", {})
+    try:
+        unsub_segments = await mqtt.async_subscribe(
+            hass,
+            f"{Z2M_BASE_TOPIC}/#",
+            lambda msg: _track_segments(segment_cache, msg.topic, msg.payload),
+        )
+        hass.data[DOMAIN][entry.entry_id]["unsub_segments"] = unsub_segments
+    except Exception:  # MQTT indisponible : les instantanes marchent, sans degrades
+        _LOGGER.warning("Suivi des degrades MQTT indisponible ; les instantanes n'enregistreront pas les segments")
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
@@ -531,6 +581,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.debug("Entite ignoree dans l'instantane (etat indisponible): %s", entity_id)
                 continue
             captured[entity_id] = _capture_snapshot_entity(state, include_effects)
+            segments = segment_cache.get(_z2m_name_for(state).lower())
+            if segments and captured[entity_id]["state"] == "on" and state.domain == "light":
+                captured[entity_id]["z2m_name"] = _z2m_name_for(state)
+                captured[entity_id]["segments"] = segments
         snapshots = hass.data[DOMAIN][entry.entry_id]["snapshots"]
         snapshots[call.data["name"]] = {"entities": captured, "include_effects": include_effects}
         await snapshots_store.async_save({"snapshots": snapshots})
@@ -555,11 +609,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     if domain == "light" and transition is not None:
                         data["transition"] = transition
                     await hass.services.async_call(
-                        domain if domain == "light" else "homeassistant", "turn_off", data, blocking=True
+                        domain if domain == "light" else "homeassistant", "turn_off", data, blocking=False
                     )
                 elif domain != "light":
                     await hass.services.async_call(
-                        "homeassistant", "turn_on", {"entity_id": entity_id}, blocking=True
+                        "homeassistant", "turn_on", {"entity_id": entity_id}, blocking=False
+                    )
+                elif saved.get("segments"):
+                    # Bandeau a segments : un seul message Z2M avec le degrade
+                    # (un light.turn_on classique l'ecraserait par une couleur unie).
+                    payload = {"state": "ON", **saved["segments"]}
+                    if saved.get("brightness") is not None:
+                        payload["brightness"] = min(254, saved["brightness"])
+                    if transition is not None:
+                        payload["transition"] = transition
+                    await hass.services.async_call(
+                        "mqtt",
+                        "publish",
+                        {"topic": f"{Z2M_BASE_TOPIC}/{saved['z2m_name']}/set", "payload": json.dumps(payload)},
+                        blocking=False,
                     )
                 else:
                     data = {"entity_id": entity_id, **{k: v for k, v in saved.items() if k != "state"}}
@@ -567,7 +635,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         data.pop("effect", None)
                     if transition is not None:
                         data["transition"] = transition
-                    await hass.services.async_call("light", "turn_on", data, blocking=True)
+                    await hass.services.async_call("light", "turn_on", data, blocking=False)
             except Exception:  # une entite en erreur ne doit pas bloquer les autres
                 _LOGGER.exception("Echec de la restauration de %s", entity_id)
 
@@ -1119,5 +1187,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     retirer explicitement au dechargement d'une simple entree)."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
+        unsub = hass.data[DOMAIN].get(entry.entry_id, {}).get("unsub_segments")
+        if unsub is not None:
+            unsub()
         hass.data[DOMAIN].pop(entry.entry_id, None)
     return unload_ok
