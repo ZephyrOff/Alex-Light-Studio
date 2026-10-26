@@ -20,6 +20,11 @@ STORAGE_KEY_STRIPS = f"{DOMAIN}.strips"
 # meme temps -> 2^N scenes sans ce mecanisme).
 STORAGE_KEY_LIGHT_ZONES = f"{DOMAIN}.light_zones"
 
+# Instantanes d'etat de lumieres (services save_snapshot/load_snapshot) :
+# alternative a scene.create dont on controle ce qui est capture (effets
+# inclus ou non), et qui survit aux redemarrages de HA.
+STORAGE_KEY_SNAPSHOTS = f"{DOMAIN}.snapshots"
+
 SIGNAL_GRADIENT_SCENES_UPDATED = f"{DOMAIN}_gradient_scenes_updated"
 SIGNAL_STRIPS_UPDATED = f"{DOMAIN}_strips_updated"
 SIGNAL_LIGHT_ZONES_UPDATED = f"{DOMAIN}_light_zones_updated"
@@ -30,6 +35,9 @@ SIGNAL_LIGHT_ZONES_UPDATED = f"{DOMAIN}_light_zones_updated"
 SERVICE_SAVE_GRADIENT_SCENE = "save_scene"
 SERVICE_LOAD_GRADIENT_SCENE = "load_scene"
 SERVICE_DELETE_GRADIENT_SCENE = "delete_scene"
+SERVICE_SAVE_SNAPSHOT = "save_snapshot"
+SERVICE_LOAD_SNAPSHOT = "load_snapshot"
+SERVICE_DELETE_SNAPSHOT = "delete_snapshot"
 
 DEVICE_TYPE_HUE = "hue"
 DEVICE_TYPE_AQARA = "aqara"

@@ -96,3 +96,77 @@ delete_scene:
       required: true
       selector:
         text:
+
+save_snapshot:
+  name: Enregistrer un instantané de lumières
+  description: >-
+    Enregistre l'état actuel (allumé/éteint, luminosité, couleur) d'une liste
+    de lumières, comme scene.create, mais en choisissant d'inclure ou non les
+    effets en cours. Conservé après un redémarrage de Home Assistant.
+  fields:
+    name:
+      name: Nom
+      description: Nom de l'instantané (sert à le recharger ensuite).
+      required: true
+      example: "snaplight_1er"
+      selector:
+        text:
+    snapshot_entities:
+      name: Entités
+      description: Lumières (ou autres entités on/off) à enregistrer.
+      required: true
+      example: "{{ label_entities('light_1er') }}"
+      selector:
+        entity:
+          multiple: true
+    include_effects:
+      name: Inclure les effets
+      description: >-
+        Désactivé (par défaut) : l'effet en cours n'est pas enregistré, donc
+        jamais relancé au rechargement.
+      required: false
+      default: false
+      selector:
+        boolean:
+
+load_snapshot:
+  name: Charger un instantané de lumières
+  description: Restaure un instantané enregistré avec save_snapshot.
+  fields:
+    name:
+      name: Nom
+      description: Nom de l'instantané à charger.
+      required: true
+      example: "snaplight_1er"
+      selector:
+        text:
+    transition:
+      name: Transition
+      description: Durée de la transition, en secondes.
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 300
+          step: 0.5
+          unit_of_measurement: s
+    restore_effects:
+      name: Restaurer les effets
+      description: >-
+        Si l'instantané contient des effets, les rejouer (défaut : oui).
+        Décocher pour les ignorer à ce chargement.
+      required: false
+      default: true
+      selector:
+        boolean:
+
+delete_snapshot:
+  name: Supprimer un instantané de lumières
+  description: Supprime définitivement un instantané enregistré.
+  fields:
+    name:
+      name: Nom
+      description: Nom de l'instantané à supprimer.
+      required: true
+      selector:
+        text:

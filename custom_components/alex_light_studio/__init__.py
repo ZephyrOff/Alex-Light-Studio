@@ -30,6 +30,7 @@ de tableau de bord une fois l'integration installee.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -64,14 +65,18 @@ from .const import (
     PANEL_TITLE,
     PANEL_URL_PATH,
     SERVICE_DELETE_GRADIENT_SCENE,
+    SERVICE_DELETE_SNAPSHOT,
     SERVICE_LOAD_GRADIENT_SCENE,
+    SERVICE_LOAD_SNAPSHOT,
     SERVICE_SAVE_GRADIENT_SCENE,
+    SERVICE_SAVE_SNAPSHOT,
     SIGNAL_GRADIENT_SCENES_UPDATED,
     SIGNAL_LIGHT_ZONES_UPDATED,
     SIGNAL_STRIPS_UPDATED,
     STORAGE_KEY_GRADIENT_SCENES,
     STORAGE_KEY_LIGHT_ZONES,
     STORAGE_KEY_ROOMS,
+    STORAGE_KEY_SNAPSHOTS,
     STORAGE_KEY_STRIPS,
     STORAGE_VERSION,
 )
@@ -321,6 +326,57 @@ LOAD_GRADIENT_SCENE_SCHEMA = vol.Schema(
 
 DELETE_GRADIENT_SCENE_SCHEMA = vol.Schema({vol.Required("name"): cv.string})
 
+# --- Instantanes d'etat (save_snapshot / load_snapshot) ----------------------
+SAVE_SNAPSHOT_SCHEMA = vol.Schema(
+    {
+        vol.Required("name"): cv.string,
+        vol.Required("snapshot_entities"): cv.entity_ids,
+        vol.Optional("include_effects", default=False): cv.boolean,
+    }
+)
+
+LOAD_SNAPSHOT_SCHEMA = vol.Schema(
+    {
+        vol.Required("name"): cv.string,
+        vol.Optional("transition"): vol.All(vol.Coerce(float), vol.Range(min=0, max=300)),
+        vol.Optional("restore_effects"): cv.boolean,
+    }
+)
+
+DELETE_SNAPSHOT_SCHEMA = vol.Schema({vol.Required("name"): cv.string})
+
+# color_mode (HA) -> attribut a memoriser pour rejouer la couleur. Un seul
+# attribut de couleur par entite : envoyer plusieurs representations de la
+# couleur dans un meme turn_on est rejete par HA.
+_SNAPSHOT_COLOR_ATTR = {
+    "hs": "hs_color",
+    "xy": "xy_color",
+    "rgb": "rgb_color",
+    "rgbw": "rgbw_color",
+    "rgbww": "rgbww_color",
+    "color_temp": "color_temp_kelvin",
+}
+
+
+def _capture_snapshot_entity(state, include_effects: bool) -> dict:
+    """Etat rejouable d'une entite. `effect` n'est memorise que sur demande :
+    c'est lui qui relance un effet (Aqara...) au rechargement d'une scene."""
+    if state.state != "on":
+        return {"state": state.state}
+    attrs = state.attributes
+    captured: dict = {"state": "on"}
+    if state.domain != "light":
+        return captured
+    color_attr = _SNAPSHOT_COLOR_ATTR.get(attrs.get("color_mode"))
+    if color_attr and attrs.get(color_attr) is not None:
+        captured[color_attr] = list(attrs[color_attr]) if isinstance(attrs[color_attr], (list, tuple)) else attrs[color_attr]
+    if attrs.get("brightness") is not None:
+        captured["brightness"] = attrs["brightness"]
+    effect = attrs.get("effect")
+    if include_effects and effect and effect != "off":
+        captured["effect"] = effect
+    return captured
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Initialise l'integration : stockages, commandes websocket, services
@@ -337,8 +393,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     light_zones_store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY_LIGHT_ZONES)
     light_zones_data = await light_zones_store.async_load() or {"zones": {}}
 
+    snapshots_store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY_SNAPSHOTS)
+    snapshots_data = await snapshots_store.async_load() or {"snapshots": {}}
+
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = {
+        "snapshots_store": snapshots_store,
+        "snapshots": snapshots_data.get("snapshots", {}),
         "rooms_store": rooms_store,
         "rooms": rooms_data.get("rooms", {}),
         "gradient_store": gradient_store,
@@ -440,14 +501,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         colors = resample_stops(scene["stops"], segments)
 
+        # "state": "ON" : allume aussi le bandeau s'il etait eteint.
         if device_type == DEVICE_TYPE_AQARA:
             payload = {
+                "state": "ON",
                 "segment_colors": [
                     {"segment": i + 1, "color": hex_to_rgb_obj(color)} for i, color in enumerate(colors)
-                ]
+                ],
             }
         else:
-            payload = {"gradient": colors}
+            payload = {"state": "ON", "gradient": colors}
 
         await hass.services.async_call(
             "mqtt",
@@ -458,6 +521,70 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.debug(
             "Scene de degrade '%s' appliquee sur %s (%d segments, %s)", name, entity_id, segments, device_type
         )
+
+    async def _handle_save_snapshot(call: ServiceCall) -> None:
+        include_effects = call.data["include_effects"]
+        captured = {}
+        for entity_id in call.data["snapshot_entities"]:
+            state = hass.states.get(entity_id)
+            if state is None or state.state in ("unavailable", "unknown"):
+                _LOGGER.debug("Entite ignoree dans l'instantane (etat indisponible): %s", entity_id)
+                continue
+            captured[entity_id] = _capture_snapshot_entity(state, include_effects)
+        snapshots = hass.data[DOMAIN][entry.entry_id]["snapshots"]
+        snapshots[call.data["name"]] = {"entities": captured, "include_effects": include_effects}
+        await snapshots_store.async_save({"snapshots": snapshots})
+        _LOGGER.debug(
+            "Instantane '%s' enregistre (%d entites, effets: %s)", call.data["name"], len(captured), include_effects
+        )
+
+    async def _handle_load_snapshot(call: ServiceCall) -> None:
+        name = call.data["name"]
+        snapshot = hass.data[DOMAIN][entry.entry_id]["snapshots"].get(name)
+        if snapshot is None:
+            _LOGGER.warning("Instantane inconnu: %s", name)
+            return
+        transition = call.data.get("transition")
+        restore_effects = call.data.get("restore_effects", True)
+
+        async def _apply(entity_id: str, saved: dict) -> None:
+            domain = entity_id.split(".", 1)[0]
+            try:
+                if saved["state"] != "on":
+                    data = {"entity_id": entity_id}
+                    if domain == "light" and transition is not None:
+                        data["transition"] = transition
+                    await hass.services.async_call(
+                        domain if domain == "light" else "homeassistant", "turn_off", data, blocking=True
+                    )
+                elif domain != "light":
+                    await hass.services.async_call(
+                        "homeassistant", "turn_on", {"entity_id": entity_id}, blocking=True
+                    )
+                else:
+                    data = {"entity_id": entity_id, **{k: v for k, v in saved.items() if k != "state"}}
+                    if not restore_effects:
+                        data.pop("effect", None)
+                    if transition is not None:
+                        data["transition"] = transition
+                    await hass.services.async_call("light", "turn_on", data, blocking=True)
+            except Exception:  # une entite en erreur ne doit pas bloquer les autres
+                _LOGGER.exception("Echec de la restauration de %s", entity_id)
+
+        await asyncio.gather(*(_apply(eid, saved) for eid, saved in snapshot["entities"].items()))
+
+    async def _handle_delete_snapshot(call: ServiceCall) -> None:
+        snapshots = hass.data[DOMAIN][entry.entry_id]["snapshots"]
+        if snapshots.pop(call.data["name"], None) is None:
+            _LOGGER.warning("Suppression demandee pour un instantane inconnu: %s", call.data["name"])
+            return
+        await snapshots_store.async_save({"snapshots": snapshots})
+
+    hass.services.async_register(DOMAIN, SERVICE_SAVE_SNAPSHOT, _handle_save_snapshot, schema=SAVE_SNAPSHOT_SCHEMA)
+    hass.services.async_register(DOMAIN, SERVICE_LOAD_SNAPSHOT, _handle_load_snapshot, schema=LOAD_SNAPSHOT_SCHEMA)
+    hass.services.async_register(
+        DOMAIN, SERVICE_DELETE_SNAPSHOT, _handle_delete_snapshot, schema=DELETE_SNAPSHOT_SCHEMA
+    )
 
     hass.services.async_register(
         DOMAIN, SERVICE_SAVE_GRADIENT_SCENE, _handle_save_gradient_scene, schema=SAVE_GRADIENT_SCENE_SCHEMA

@@ -679,12 +679,12 @@ class AlexLightStudioPanel extends HTMLElement {
         .btn-outline:active { transform: scale(.98); }
         .btn:disabled { opacity: .35; cursor: not-allowed; transform: none !important; filter: none !important; }
 
-        input[type="text"], input[type="number"], select {
+        input[type="text"], input[type="search"], input[type="number"], select {
           padding: 9px 12px; border-radius: var(--als-radius-sm); border: 1px solid var(--als-border-strong);
           background: var(--als-surface); color: var(--als-text);
           font-size: 13px; width: 100%; transition: border-color .15s ease, box-shadow .15s ease;
         }
-        input[type="text"]:focus, input[type="number"]:focus, select:focus {
+        input[type="text"]:focus, input[type="search"]:focus, input[type="number"]:focus, select:focus {
           outline: none; border-color: var(--als-accent); box-shadow: 0 0 0 3px rgba(var(--als-accent-rgb),.2);
         }
         input[type="checkbox"] { accent-color: var(--als-accent); width: 17px; height: 17px; cursor: pointer; }
@@ -834,7 +834,7 @@ class AlexLightStudioPanel extends HTMLElement {
           .row { flex-direction: column; align-items: stretch; }
           .row label { flex: none; margin-bottom: 4px; }
           .row > *:not(label) { min-width: 0; }
-          .btn, input[type="text"], input[type="number"], select {
+          .btn, input[type="text"], input[type="search"], input[type="number"], select {
             padding: 11px 14px; /* cibles tactiles plus confortables (~44px de haut avec le texte) */
           }
           .scene-row { flex-wrap: wrap; }
@@ -2872,6 +2872,7 @@ class AlexLightStudioPanel extends HTMLElement {
         </p>
         <div class="row">
           <label>Lumière</label>
+          <input type="search" id="gradient-entity-search" placeholder="Rechercher une lumière…" autocomplete="off" />
           <select id="gradient-entity-select"></select>
         </div>
         <div class="row">
@@ -2924,6 +2925,10 @@ class AlexLightStudioPanel extends HTMLElement {
     this.shadowRoot.querySelector("#gradient-entity-select").addEventListener("change", (ev) => {
       this._gradientTestEntity = ev.target.value;
     });
+    this.shadowRoot.querySelector("#gradient-entity-search").addEventListener("input", (ev) => {
+      this._gradientEntityFilter = ev.target.value.trim().toLowerCase();
+      this._populateGradientEntitySelect();
+    });
     this.shadowRoot.querySelector("#gradient-add-stop").addEventListener("click", () => {
       if (this._gradientStops.length >= 10) return;
       this._gradientStops.push("#ffffff");
@@ -2941,17 +2946,17 @@ class AlexLightStudioPanel extends HTMLElement {
   _populateGradientEntitySelect() {
     const sel = this.shadowRoot.querySelector("#gradient-entity-select");
     if (!sel || !this._hass) return;
+    const nameOf = (id) => (this._hass.states[id].attributes && this._hass.states[id].attributes.friendly_name) || id;
+    const filter = this._gradientEntityFilter || "";
+    // La lumiere deja choisie reste toujours listee, meme si elle ne
+    // correspond pas a la recherche en cours (sinon la selection serait perdue).
     const entities = Object.keys(this._hass.states)
       .filter((id) => id.startsWith("light."))
+      .filter((id) => !filter || id === this._gradientTestEntity || `${id} ${nameOf(id)}`.toLowerCase().includes(filter))
       .sort();
     sel.innerHTML =
       `<option value="">— choisir —</option>` +
-      entities
-        .map((id) => {
-          const name = (this._hass.states[id].attributes && this._hass.states[id].attributes.friendly_name) || id;
-          return `<option value="${escapeHtml(id)}">${escapeHtml(name)}</option>`;
-        })
-        .join("");
+      entities.map((id) => `<option value="${escapeHtml(id)}">${escapeHtml(nameOf(id))}</option>`).join("");
     sel.value = this._gradientTestEntity;
   }
 
@@ -3022,10 +3027,12 @@ class AlexLightStudioPanel extends HTMLElement {
     const segments = await this._resolveGradientSegments(this._gradientTestEntity);
     const colors = this._resampleGradientStops(this._gradientStops, segments);
     const friendlyName = gradientFriendlyNameFor(this._hass, this._gradientTestEntity, this._gradientFriendlyNameOverride);
+    // "state": "ON" : allume la lumiere dans le meme message (sinon un
+    // bandeau eteint n'affiche rien malgre les couleurs recues).
     const payload =
       this._gradientDeviceType === "aqara"
-        ? { segment_colors: colors.map((c, i) => ({ segment: i + 1, color: gradientHexToRgbObj(c) })) }
-        : { gradient: colors };
+        ? { state: "ON", segment_colors: colors.map((c, i) => ({ segment: i + 1, color: gradientHexToRgbObj(c) })) }
+        : { state: "ON", gradient: colors };
     this._hass.callService("mqtt", "publish", {
       topic: `zigbee2mqtt/${friendlyName}/set`,
       payload: JSON.stringify(payload),
