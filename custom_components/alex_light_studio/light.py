@@ -200,6 +200,22 @@ class AlexLightStudioZoneLight(RestoreEntity, LightEntity):
         self._attr_brightness = brightness
         self.async_write_ha_state()
 
+    def sync_from_strip(self, *, on: bool, hs=None, kelvin=None, brightness=None) -> None:
+        """Aligne cette zone sur une commande appliquee au bandeau ENTIER
+        (voir __init__._sync_zones_from_strip_command). Mise a jour directe,
+        sans recalcul : le bandeau physique affiche deja cet etat."""
+        self._attr_is_on = on
+        if on:
+            if hs is not None:
+                self._attr_hs_color = hs
+                self._attr_color_mode = ColorMode.HS
+            elif kelvin is not None:
+                self._attr_color_temp_kelvin = kelvin
+                self._attr_color_mode = ColorMode.COLOR_TEMP
+            if brightness is not None:
+                self._attr_brightness = min(255, int(brightness))
+        self.async_write_ha_state()
+
     def _sibling_active_brightness(self) -> int | None:
         """Luminosite d'une zone deja active sur le meme bandeau, s'il y en
         a une -- pour qu'une zone qui s'allume rejoigne le niveau courant

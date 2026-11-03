@@ -43,11 +43,12 @@ import voluptuous as vol
 from homeassistant.components import mqtt, panel_custom, websocket_api
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.storage import Store
+from homeassistant.util import color as color_util
 from homeassistant.util import slugify
 
 from . import harmony
@@ -401,6 +402,50 @@ def _track_segments(cache: dict, topic: str, payload) -> None:
         cache.pop(key, None)
 
 
+def _sync_zones_from_strip_command(hass: HomeAssistant, entry_id: str, topic: str, payload) -> None:
+    """Quand le bandeau entier recoit une couleur unie / une extinction depuis
+    l'exterieur (light.turn_on sur son entite, app, automatisation), aligne
+    les entites des zones dessus -- sinon elles gardent leur ancienne
+    configuration alors que le bandeau physique a change. Les messages
+    emis par l'integration (segment_colors/gradient + state/brightness, jamais
+    de `color`) sont ignores, donc pas de boucle."""
+    if not topic.endswith("/set") or not topic.startswith(f"{Z2M_BASE_TOPIC}/"):
+        return
+    try:
+        data = json.loads(payload)
+    except (TypeError, ValueError):
+        return
+    if not isinstance(data, dict) or "segment_colors" in data or "gradient" in data:
+        return
+
+    off = str(data.get("state", "")).upper() == "OFF"
+    hs = kelvin = None
+    color = data.get("color")
+    if isinstance(color, dict):
+        if "h" in color and "s" in color:
+            hs = (float(color["h"]), float(color["s"]))
+        elif "x" in color and "y" in color:
+            hs = color_util.color_xy_to_hs(float(color["x"]), float(color["y"]))
+        elif all(k in color for k in ("r", "g", "b")):
+            hs = color_util.color_RGB_to_hs(color["r"], color["g"], color["b"])
+    if data.get("color_temp"):
+        kelvin = round(1_000_000 / float(data["color_temp"]))
+    if not off and hs is None and kelvin is None:
+        return
+
+    name = topic[len(Z2M_BASE_TOPIC) + 1 : -len("/set")].lower()
+    entry_data = hass.data[DOMAIN][entry_id]
+    for strip_id, strip in entry_data["strips"].items():
+        state = hass.states.get(strip["entity"])
+        strip_name = strip.get("friendly_name") or (_z2m_name_for(state) if state else strip["entity"].split(".", 1)[1])
+        if strip_name.lower() != name:
+            continue
+        for zid, cfg in entry_data["light_zones"].items():
+            entity = entry_data.get("zone_entities", {}).get(zid)
+            if cfg.get("strip_id") == strip_id and entity is not None:
+                entity.sync_from_strip(on=not off, hs=hs, kelvin=kelvin, brightness=data.get("brightness"))
+
+
 def _capture_snapshot_entity(state, include_effects: bool) -> dict:
     """Etat rejouable d'une entite. `effect` n'est memorise que sur demande :
     c'est lui qui relance un effet (Aqara...) au rechargement d'une scene."""
@@ -463,11 +508,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     }
 
     segment_cache: dict = hass.data[DOMAIN].setdefault("segment_cache", {})
+
+    @callback
+    def _on_z2m_message(msg) -> None:
+        _track_segments(segment_cache, msg.topic, msg.payload)
+        _sync_zones_from_strip_command(hass, entry.entry_id, msg.topic, msg.payload)
     try:
         unsub_segments = await mqtt.async_subscribe(
             hass,
             f"{Z2M_BASE_TOPIC}/#",
-            lambda msg: _track_segments(segment_cache, msg.topic, msg.payload),
+            _on_z2m_message,
         )
         hass.data[DOMAIN][entry.entry_id]["unsub_segments"] = unsub_segments
     except Exception:  # MQTT indisponible : les instantanes marchent, sans degrades
