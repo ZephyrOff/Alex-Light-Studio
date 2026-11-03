@@ -274,6 +274,8 @@ STRIP_SCHEMA = {
     vol.Optional("length_entity", default=""): str,
     vol.Optional("segments"): vol.All(vol.Coerce(int), vol.Range(min=2, max=MAX_SEGMENTS)),
     vol.Optional("name", default=""): str,
+    # Fondu entre zones voisines (0 = coupure nette, voir zones.blend_zone_edges).
+    vol.Optional("zone_blend", default=0): vol.All(vol.Coerce(float), vol.Range(min=0, max=100)),
 }
 
 GET_STRIPS_SCHEMA = {vol.Required("type"): f"{DOMAIN}/get_strips"}
@@ -310,6 +312,7 @@ SAVE_GRADIENT_SCENE_SCHEMA = vol.Schema(
     {
         vol.Required("name"): cv.string,
         vol.Required("colors"): vol.All(cv.ensure_list, [cv.string]),
+        vol.Optional("blend", default=100): vol.All(vol.Coerce(float), vol.Range(min=0, max=100)),
     }
 )
 
@@ -317,6 +320,7 @@ LOAD_GRADIENT_SCENE_SCHEMA = vol.Schema(
     {
         vol.Required("entity_id"): cv.entity_id,
         vol.Required("name"): cv.string,
+        vol.Optional("blend"): vol.All(vol.Coerce(float), vol.Range(min=0, max=100)),
         vol.Required("device_type"): vol.In([DEVICE_TYPE_AQARA, "hue"]),
         vol.Optional("friendly_name"): cv.string,
         vol.Optional("length_entity"): cv.entity_id,
@@ -500,7 +504,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         name = call.data["name"]
         colors = call.data["colors"]
         stops = colors_to_stops(colors)
-        hass.data[DOMAIN][entry.entry_id]["gradient_scenes"][name] = {"stops": stops}
+        hass.data[DOMAIN][entry.entry_id]["gradient_scenes"][name] = {"stops": stops, "blend": call.data["blend"]}
         _LOGGER.debug("Scene de degrade enregistree: %s (%d points)", name, len(stops))
         await _async_persist_gradient_scenes()
 
@@ -549,7 +553,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if segments is None:
             segments = DEFAULT_SEGMENTS
 
-        colors = resample_stops(scene["stops"], segments)
+        blend = call.data.get("blend", scene.get("blend", 100))
+        colors = resample_stops(scene["stops"], segments, blend)
 
         # "state": "ON" : allume aussi le bandeau s'il etait eteint.
         if device_type == DEVICE_TYPE_AQARA:
@@ -782,7 +787,7 @@ async def _async_recompute_strip(hass: HomeAssistant, entry_id: str, strip_id: s
     friendly_name = strip.get("friendly_name") or attr_friendly_name or object_id
 
     segments = _resolve_strip_segments(hass, strip)
-    colors = compute_zone_colors(zones_for_strip, segments)
+    colors = compute_zone_colors(zones_for_strip, segments, blend=strip.get("zone_blend", 0))
 
     # Luminosite native du bandeau (0-255 HA -> 0-254 Z2M) plutot que cuite
     # dans chaque couleur RVB -- voir AlexLightStudioZoneLight.rgb_color_hex
@@ -1030,6 +1035,7 @@ async def websocket_save_strip(hass: HomeAssistant, connection, msg) -> None:
         "length_entity": msg.get("length_entity", ""),
         "segments": msg.get("segments"),
         "name": msg.get("name", ""),
+        "zone_blend": msg.get("zone_blend", 0),
     }
     await _async_persist_strips(hass)
     connection.send_result(msg["id"], {"strip": strips[strip_id]})

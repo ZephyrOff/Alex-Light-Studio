@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import math
 
+from .gradient import _lerp_color
+
 
 def hsv_to_hex(hue: float, saturation: float, value: float) -> str:
     """Teinte (0-360), saturation (0-1), valeur (0-1) -> couleur hex.
@@ -86,7 +88,9 @@ def kelvin_to_hex(kelvin: float, value: float = 1.0) -> str:
     return "#" + "".join(f"{max(0, min(255, round(c))):02x}" for c in rgb)
 
 
-def compute_zone_colors(zones: list[dict], segment_count: int, idle_color: str = "#000000") -> list[str]:
+def compute_zone_colors(
+    zones: list[dict], segment_count: int, idle_color: str = "#000000", blend: float = 0.0
+) -> list[str]:
     """Combine l'etat courant de toutes les zones d'un bandeau en un tableau
     de `segment_count` couleurs.
 
@@ -94,8 +98,12 @@ def compute_zone_colors(zones: list[dict], segment_count: int, idle_color: str =
     bool, "color": "#rrggbb"}. Une zone inactive (is_on=False) laisse ses
     segments a `idle_color`. Chevauchement entre deux zones actives sur un
     meme segment : la derniere de la liste l'emporte (dernier-applique
-    gagne) -- l'appelant est responsable de l'ordre si ca compte."""
+    gagne) -- l'appelant est responsable de l'ordre si ca compte.
+
+    `blend` (0-100) adoucit la frontiere entre deux zones ACTIVES voisines de
+    couleurs differentes (voir blend_zone_edges) ; 0 = coupure nette."""
     colors = [idle_color] * max(0, segment_count)
+    active = [False] * max(0, segment_count)
     for zone in zones:
         if not zone.get("is_on"):
             continue
@@ -103,4 +111,44 @@ def compute_zone_colors(zones: list[dict], segment_count: int, idle_color: str =
         for seg in zone.get("segments", []):
             if 0 <= seg < segment_count:
                 colors[seg] = color
+                active[seg] = True
+    if blend > 0:
+        colors = blend_zone_edges(colors, active, blend)
     return colors
+
+
+def blend_zone_edges(colors: list[str], active: list[bool], blend: float) -> list[str]:
+    """Fondu a la frontiere de deux plages actives adjacentes de couleurs
+    differentes. Une plage = segments actifs consecutifs de meme couleur ; la
+    zone de fondu est centree sur la frontiere et fait `blend`% de la plus
+    petite des deux plages (donc ne deborde jamais sur le coeur d'une plage).
+    Un segment eteint n'est jamais touche : une zone allumee a cote d'une zone
+    eteinte garde un bord net, sinon la lumiere deborderait sur la zone eteinte."""
+    n = len(colors)
+    runs: list[tuple[int, int]] = []  # (debut, fin exclue)
+    i = 0
+    while i < n:
+        if not active[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and active[j + 1] and colors[j + 1] == colors[i]:
+            j += 1
+        runs.append((i, j + 1))
+        i = j + 1
+
+    w = max(0.0, min(1.0, blend / 100.0))
+    out = list(colors)
+    for (s1, e1), (s2, e2) in zip(runs, runs[1:]):
+        if e1 != s2:  # separees par un segment eteint/inactif
+            continue
+        half = w * min(e1 - s1, e2 - s2) / 2
+        if half <= 0:
+            continue
+        for seg in range(max(s1, int(e1 - half) - 1), min(e2, int(e1 + half) + 2)):
+            centre = seg + 0.5
+            if centre < e1 - half or centre > e1 + half:
+                continue
+            t = (centre - (e1 - half)) / (2 * half)
+            out[seg] = _lerp_color(colors[s1], colors[s2], t)
+    return out

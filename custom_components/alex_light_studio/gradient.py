@@ -42,11 +42,18 @@ def _lerp_color(c1: str, c2: str, t: float) -> str:
     return _rgb_to_hex((r1 + (r2 - r1) * t, g1 + (g2 - g1) * t, b1 + (b2 - b1) * t))
 
 
-def resample_stops(stops: list[dict], segments: int) -> list[str]:
+def resample_stops(stops: list[dict], segments: int, blend: float = 100.0) -> list[str]:
     """Reechantillonne des points d'ancrage pour produire exactement
-    `segments` couleurs hex par interpolation lineaire -- le meme principe
-    qu'un degrade CSS rendu a une resolution donnee. Les points d'ancrage
-    n'ont pas besoin d'etre pre-tries ni de couvrir exactement [0,1]."""
+    `segments` couleurs hex -- le meme principe qu'un degrade CSS rendu a une
+    resolution donnee. Les points d'ancrage n'ont pas besoin d'etre
+    pre-tries ni de couvrir exactement [0,1].
+
+    `blend` (0-100) regle le type de coupure entre deux couleurs voisines :
+    100 = fondu progressif sur toute la distance (degrade classique), 0 =
+    coupure nette (N couleurs -> N bandes egales), entre les deux = bandes
+    separees par une zone de fondu de plus en plus etroite. Les positions
+    des couleurs et des segments passent continument du mode "degrade"
+    (aux extremites) au mode "bandes" (aux centres), donc pas de saut."""
     if segments <= 0:
         return []
     if not stops:
@@ -56,17 +63,33 @@ def resample_stops(stops: list[dict], segments: int) -> list[str]:
     if len(sorted_stops) == 1:
         return [sorted_stops[0]["color"]] * segments
 
+    w = max(0.0, min(1.0, blend / 100.0))
+    n = len(sorted_stops)
+    positions = [w * s["position"] + (1 - w) * (k + 0.5) / n for k, s in enumerate(sorted_stops)]
+
     result: list[str] = []
     for i in range(segments):
-        pos = i / (segments - 1) if segments > 1 else 0.0
-        lo, hi = sorted_stops[0], sorted_stops[-1]
-        for j in range(len(sorted_stops) - 1):
-            if sorted_stops[j]["position"] <= pos <= sorted_stops[j + 1]["position"]:
-                lo, hi = sorted_stops[j], sorted_stops[j + 1]
+        edge = i / (segments - 1) if segments > 1 else 0.0
+        pos = w * edge + (1 - w) * (i + 0.5) / segments
+        if pos <= positions[0]:
+            result.append(sorted_stops[0]["color"])
+            continue
+        if pos >= positions[-1]:
+            result.append(sorted_stops[-1]["color"])
+            continue
+        k = 0
+        for j in range(n - 1):
+            if positions[j] <= pos <= positions[j + 1]:
+                k = j
                 break
-        span = hi["position"] - lo["position"]
-        t = 0.0 if span <= 0 else (pos - lo["position"]) / span
-        result.append(_lerp_color(lo["color"], hi["color"], t))
+        gap = positions[k + 1] - positions[k]
+        mid = positions[k] + gap / 2
+        half = w * gap / 2
+        if half <= 0:
+            t = 0.0 if pos < mid else 1.0
+        else:
+            t = max(0.0, min(1.0, (pos - (mid - half)) / (2 * half)))
+        result.append(_lerp_color(sorted_stops[k]["color"], sorted_stops[k + 1]["color"], t))
     return result
 
 

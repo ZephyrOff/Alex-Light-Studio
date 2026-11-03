@@ -369,6 +369,7 @@ class AlexLightStudioPanel extends HTMLElement {
 
     // Vue Gradient (ex-Alex Gradient Studio).
     this._gradientBuilt = false; // coquille construite une seule fois, jamais reconstruite (edition en cours preservee)
+    this._gradientBlend = 100; // 100 = fondu progressif, 0 = coupure nette
     this._gradientStops = ["#ff6b35", "#f7c548", "#ffe066", "#c04cfd", "#5e60ce"];
     this._gradientTestEntity = "";
     this._gradientFriendlyNameOverride = "";
@@ -764,6 +765,7 @@ class AlexLightStudioPanel extends HTMLElement {
         /* --- Vue Gradient (ex-Alex Gradient Studio) -------------------- */
         .stops-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
         .stop-cell { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+        .gradient-preview { height: 28px; border-radius: var(--als-radius-sm); border: 1px solid var(--als-border-strong); margin-bottom: 4px; }
         .stop-cell input[type="color"] {
           width: 48px; height: 48px; border: 2px solid var(--als-border-strong); border-radius: var(--als-radius-sm);
           padding: 0; cursor: pointer; -webkit-appearance: none; appearance: none;
@@ -2891,6 +2893,12 @@ class AlexLightStudioPanel extends HTMLElement {
       <div class="card" id="gradient-editor-card">
         <h2>Éditer un dégradé</h2>
         <div class="stops-row" id="gradient-stops-row"></div>
+        <div class="gradient-preview" id="gradient-preview"></div>
+        <div class="row" style="margin-top:12px;">
+          <label>Coupure</label>
+          <input type="range" id="gradient-blend" min="0" max="100" step="5" value="100" />
+          <span id="gradient-blend-label" style="flex:0 0 auto;min-width:130px;font-size:12px;"></span>
+        </div>
         <div class="stops-controls">
           <button class="btn btn-outline" id="gradient-add-stop">+ Point</button>
           <button class="btn btn-outline" id="gradient-remove-stop">− Point</button>
@@ -2929,6 +2937,10 @@ class AlexLightStudioPanel extends HTMLElement {
       this._gradientEntityFilter = ev.target.value.trim().toLowerCase();
       this._populateGradientEntitySelect();
     });
+    this.shadowRoot.querySelector("#gradient-blend").addEventListener("input", (ev) => {
+      this._gradientBlend = parseInt(ev.target.value, 10);
+      this._renderGradientPreview();
+    });
     this.shadowRoot.querySelector("#gradient-add-stop").addEventListener("click", () => {
       if (this._gradientStops.length >= 10) return;
       this._gradientStops.push("#ffffff");
@@ -2960,9 +2972,29 @@ class AlexLightStudioPanel extends HTMLElement {
     sel.value = this._gradientTestEntity;
   }
 
+  // Apercu a 40 segments avec la coupure choisie (chaque segment = une
+  // tranche de couleur unie, comme sur le vrai bandeau).
+  _renderGradientPreview() {
+    const el = this.shadowRoot.querySelector("#gradient-preview");
+    if (!el) return;
+    const n = 40;
+    const colors = this._resampleGradientStops(this._gradientStops, n, this._gradientBlend);
+    el.style.background = `linear-gradient(90deg, ${colors
+      .map((c, i) => `${c} ${(i / n) * 100}% ${((i + 1) / n) * 100}%`)
+      .join(", ")})`;
+    const slider = this.shadowRoot.querySelector("#gradient-blend");
+    if (slider) slider.value = this._gradientBlend;
+    const label = this.shadowRoot.querySelector("#gradient-blend-label");
+    if (label) {
+      const b = this._gradientBlend;
+      label.textContent = b >= 100 ? "Fondu progressif" : b <= 0 ? "Coupure nette" : `Fondu ${b}%`;
+    }
+  }
+
   _renderGradientStops() {
     const row = this.shadowRoot.querySelector("#gradient-stops-row");
     if (!row) return;
+    this._renderGradientPreview();
     row.innerHTML = this._gradientStops
       .map(
         (color, i) => `
@@ -2975,37 +3007,43 @@ class AlexLightStudioPanel extends HTMLElement {
       el.addEventListener("input", (ev) => {
         const idx = parseInt(el.getAttribute("data-index"), 10);
         this._gradientStops[idx] = ev.target.value;
+        this._renderGradientPreview();
       });
     });
   }
 
   // Reechantillonnage local (identique a la logique cote integration) pour
   // le "Tester" -- evite un aller-retour service pour un simple apercu.
-  _resampleGradientStops(stops, segments) {
+  _resampleGradientStops(stops, segments, blend = 100) {
     if (segments <= 0) return [];
     if (!stops.length) return new Array(segments).fill("#ffffff");
     const hexToRgb = (h) => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
     const rgbToHex = (r, g, b) =>
       "#" + [r, g, b].map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0")).join("");
-    const positioned = stops.map((color, i) => ({ position: stops.length > 1 ? i / (stops.length - 1) : 0, color }));
-    if (positioned.length === 1) return new Array(segments).fill(positioned[0].color);
+    const w = Math.max(0, Math.min(1, blend / 100));
+    const n = stops.length;
+    if (n === 1) return new Array(segments).fill(stops[0]);
+    // Meme algorithme que gradient.resample_stops cote integration : positions
+    // des couleurs/segments melangees entre mode "degrade" (extremites) et
+    // mode "bandes" (centres) selon la coupure.
+    const positions = stops.map((_, k) => w * (k / (n - 1)) + (1 - w) * ((k + 0.5) / n));
 
     const out = [];
     for (let i = 0; i < segments; i++) {
-      const pos = segments > 1 ? i / (segments - 1) : 0;
-      let lo = positioned[0];
-      let hi = positioned[positioned.length - 1];
-      for (let j = 0; j < positioned.length - 1; j++) {
-        if (positioned[j].position <= pos && pos <= positioned[j + 1].position) {
-          lo = positioned[j];
-          hi = positioned[j + 1];
-          break;
-        }
+      const edge = segments > 1 ? i / (segments - 1) : 0;
+      const pos = w * edge + (1 - w) * ((i + 0.5) / segments);
+      if (pos <= positions[0]) { out.push(stops[0]); continue; }
+      if (pos >= positions[n - 1]) { out.push(stops[n - 1]); continue; }
+      let k = 0;
+      for (let j = 0; j < n - 1; j++) {
+        if (positions[j] <= pos && pos <= positions[j + 1]) { k = j; break; }
       }
-      const span = hi.position - lo.position;
-      const t = span <= 0 ? 0 : (pos - lo.position) / span;
-      const [r1, g1, b1] = hexToRgb(lo.color);
-      const [r2, g2, b2] = hexToRgb(hi.color);
+      const gap = positions[k + 1] - positions[k];
+      const mid = positions[k] + gap / 2;
+      const half = (w * gap) / 2;
+      const t = half <= 0 ? (pos < mid ? 0 : 1) : Math.max(0, Math.min(1, (pos - (mid - half)) / (2 * half)));
+      const [r1, g1, b1] = hexToRgb(stops[k]);
+      const [r2, g2, b2] = hexToRgb(stops[k + 1]);
       out.push(rgbToHex(r1 + (r2 - r1) * t, g1 + (g2 - g1) * t, b1 + (b2 - b1) * t));
     }
     return out;
@@ -3025,7 +3063,7 @@ class AlexLightStudioPanel extends HTMLElement {
   async _testGradient() {
     if (!this._gradientTestEntity) return;
     const segments = await this._resolveGradientSegments(this._gradientTestEntity);
-    const colors = this._resampleGradientStops(this._gradientStops, segments);
+    const colors = this._resampleGradientStops(this._gradientStops, segments, this._gradientBlend);
     const friendlyName = gradientFriendlyNameFor(this._hass, this._gradientTestEntity, this._gradientFriendlyNameOverride);
     // "state": "ON" : allume la lumiere dans le meme message (sinon un
     // bandeau eteint n'affiche rien malgre les couleurs recues).
@@ -3046,13 +3084,20 @@ class AlexLightStudioPanel extends HTMLElement {
       nameInput.focus();
       return;
     }
-    await this._hass.callService("alex_light_studio", "save_scene", { name, colors: this._gradientStops });
+    await this._hass.callService("alex_light_studio", "save_scene", {
+      name,
+      colors: this._gradientStops,
+      blend: this._gradientBlend,
+    });
     nameInput.value = "";
 
     // Mise a jour optimiste immediate : ne pas attendre le prochain
     // rafraichissement de hass.
     this._gradientLocalSceneOverride = this._gradientLocalSceneOverride || {};
-    this._gradientLocalSceneOverride[name] = { stops: this._gradientStopsFromColors(this._gradientStops) };
+    this._gradientLocalSceneOverride[name] = {
+      stops: this._gradientStopsFromColors(this._gradientStops),
+      blend: this._gradientBlend,
+    };
     if (this._gradientLocalSceneDeleted) this._gradientLocalSceneDeleted.delete(name);
     this._gradientLastScenesSig = null;
     this._renderGradientSceneList();
@@ -3070,6 +3115,7 @@ class AlexLightStudioPanel extends HTMLElement {
       .slice()
       .sort((a, b) => a.position - b.position)
       .map((s) => s.color);
+    this._gradientBlend = scene.blend == null ? 100 : scene.blend;
     this._renderGradientStops();
 
     const nameInput = this.shadowRoot.querySelector("#gradient-scene-name");
@@ -3172,6 +3218,11 @@ class AlexLightStudioPanel extends HTMLElement {
           <button class="btn btn-outline" id="lightzone-delete-strip-btn">Supprimer ce bandeau</button>
         </div>
         <div class="hint error" id="lightzone-strip-error" style="display:none;"></div>
+        <div class="row" id="lightzone-blend-row" style="margin-top:12px;">
+          <label>Coupure entre zones</label>
+          <input type="range" id="lightzone-blend" min="0" max="100" step="5" value="0" />
+          <span id="lightzone-blend-label" style="flex:0 0 auto;min-width:130px;font-size:12px;"></span>
+        </div>
 
         <div id="lightzone-new-strip-form" style="display:none;">
           <div class="row">
@@ -3241,6 +3292,9 @@ class AlexLightStudioPanel extends HTMLElement {
         this._lightzoneShowNewStripForm ? "block" : "none";
     });
     this.shadowRoot.querySelector("#lightzone-delete-strip-btn").addEventListener("click", () => this._deleteLightZoneStrip());
+    const blendInput = this.shadowRoot.querySelector("#lightzone-blend");
+    blendInput.addEventListener("input", () => this._updateLightZoneBlendLabel(parseInt(blendInput.value, 10)));
+    blendInput.addEventListener("change", () => this._saveLightZoneBlend(parseInt(blendInput.value, 10)));
 
     this.shadowRoot.querySelector("#lightzone-strip-entity-select").addEventListener("change", (ev) => {
       this._lightzoneNewStrip.entity = ev.target.value;
@@ -3329,6 +3383,13 @@ class AlexLightStudioPanel extends HTMLElement {
     const segCard = this.shadowRoot.querySelector("#lightzone-segments-card");
     const listCard = this.shadowRoot.querySelector("#lightzone-list-card");
     const hasStrip = !!this._lightzoneSelectedStripId && !!this._lightzoneStrips[this._lightzoneSelectedStripId];
+    const blendRow = this.shadowRoot.querySelector("#lightzone-blend-row");
+    if (blendRow) blendRow.style.display = hasStrip ? "flex" : "none";
+    if (hasStrip) {
+      const blend = this._lightzoneStrips[this._lightzoneSelectedStripId].zone_blend || 0;
+      this.shadowRoot.querySelector("#lightzone-blend").value = blend;
+      this._updateLightZoneBlendLabel(blend);
+    }
     if (segCard) segCard.style.display = hasStrip ? "block" : "none";
     if (listCard) listCard.style.display = hasStrip ? "block" : "none";
     if (!hasStrip) return;
@@ -3477,6 +3538,31 @@ class AlexLightStudioPanel extends HTMLElement {
     list.querySelectorAll(".lightzone-delete-zone-btn").forEach((btn) => {
       btn.addEventListener("click", () => this._deleteLightZoneZone(btn.closest(".zone-row").getAttribute("data-zone-id")));
     });
+  }
+
+  _updateLightZoneBlendLabel(blend) {
+    const label = this.shadowRoot.querySelector("#lightzone-blend-label");
+    if (label) label.textContent = blend <= 0 ? "Coupure nette" : blend >= 100 ? "Fondu maximal" : `Fondu ${blend}%`;
+  }
+
+  // Enregistre la coupure entre zones du bandeau selectionne (upsert du
+  // bandeau existant) ; prise en compte au prochain allumage/extinction d'une zone.
+  async _saveLightZoneBlend(blend) {
+    const strip = this._lightzoneStrips[this._lightzoneSelectedStripId];
+    if (!strip) return;
+    const payload = {
+      type: "alex_light_studio/save_strip",
+      strip_id: strip.id,
+      entity: strip.entity,
+      device_type: strip.device_type,
+      friendly_name: strip.friendly_name || "",
+      length_entity: strip.length_entity || "",
+      name: strip.name || "",
+      zone_blend: blend,
+    };
+    if (strip.segments) payload.segments = strip.segments;
+    const result = await this._hass.callWS(payload);
+    if (result && result.strip) this._lightzoneStrips[result.strip.id] = result.strip;
   }
 
   async _saveLightZoneStrip() {

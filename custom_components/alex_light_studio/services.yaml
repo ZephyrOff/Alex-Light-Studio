@@ -23,6 +23,19 @@ save_scene:
       example: ["#ff6b35", "#f7c548", "#ffe066", "#c04cfd", "#5e60ce"]
       selector:
         object:
+    blend:
+      name: Fondu
+      description: >-
+        Type de coupure entre deux couleurs : 100 = fondu progressif (défaut),
+        0 = coupure nette en bandes égales.
+      required: false
+      default: 100
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 5
+          unit_of_measurement: "%"
 
 load_scene:
   name: Charger une scène de dégradé
@@ -45,6 +58,18 @@ load_scene:
       example: "Coucher de soleil"
       selector:
         text:
+    blend:
+      name: Fondu (remplace celui de la scène)
+      description: >-
+        100 = fondu progressif, 0 = coupure nette. Vide = valeur enregistrée
+        avec la scène.
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 5
+          unit_of_measurement: "%"
     device_type:
       name: Type d'appareil
       description: Détermine le format du message envoyé à Zigbee2MQTT.
