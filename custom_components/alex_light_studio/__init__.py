@@ -1175,13 +1175,19 @@ async def _async_register_panel(hass: HomeAssistant) -> None:
         ]
     )
 
+    panel_version = int(
+        await hass.async_add_executor_job(os.path.getmtime, os.path.join(panel_dir, "alex-light-studio-panel.js"))
+    )
+
     await panel_custom.async_register_panel(
         hass,
         webcomponent_name="alex-light-studio-panel",
         frontend_url_path=PANEL_URL_PATH,
         sidebar_title=PANEL_TITLE,
         sidebar_icon=PANEL_ICON,
-        module_url=f"{panel_static_url}/alex-light-studio-panel.js",
+        # ?v=<date de modif> : sans ca le navigateur garde l'ancien JS en cache
+        # apres une mise a jour de l'integration (nouveaux controles invisibles).
+        module_url=f"{panel_static_url}/alex-light-studio-panel.js?v={panel_version}",
         embed_iframe=False,
         require_admin=True,
     )

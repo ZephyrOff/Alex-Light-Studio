@@ -373,6 +373,7 @@ class AlexLightStudioPanel extends HTMLElement {
     this._gradientStops = ["#ff6b35", "#f7c548", "#ffe066", "#c04cfd", "#5e60ce"];
     this._gradientTestEntity = "";
     this._gradientFriendlyNameOverride = "";
+    this._gradientHuePoints = 0; // 0 = auto (autant de points que de couleurs)
     this._gradientDeviceType = "hue";
     this._gradientLastScenesSig = null;
 
@@ -2884,6 +2885,15 @@ class AlexLightStudioPanel extends HTMLElement {
             <option value="aqara">Aqara LED Strip T1</option>
           </select>
         </div>
+        <div class="row" id="gradient-hue-points-row">
+          <label>Points Hue</label>
+          <input type="number" id="gradient-hue-points-input" min="2" max="50" placeholder="vide = autant que de couleurs" />
+        </div>
+        <p class="hint" id="gradient-hue-points-hint">
+          Une Hue fond elle-même les couleurs entre deux points : pour une
+          coupure nette (réglage « Coupure » bas), envoie plus de points que de
+          couleurs. Le maximum dépend de l'appareil.
+        </p>
         <div class="row">
           <label>Nom convivial Z2M</label>
           <input type="text" id="gradient-friendly-name-input" placeholder="vide = déduit de l'entité" />
@@ -2923,9 +2933,14 @@ class AlexLightStudioPanel extends HTMLElement {
 
     this._populateGradientEntitySelect();
     this._renderGradientStops();
+    this._updateGradientHuePointsVisibility();
 
+    this.shadowRoot.querySelector("#gradient-hue-points-input").addEventListener("input", (ev) => {
+      this._gradientHuePoints = parseInt(ev.target.value, 10) || 0;
+    });
     this.shadowRoot.querySelector("#gradient-device-type-select").addEventListener("change", (ev) => {
       this._gradientDeviceType = ev.target.value;
+      this._updateGradientHuePointsVisibility();
     });
     this.shadowRoot.querySelector("#gradient-friendly-name-input").addEventListener("input", (ev) => {
       this._gradientFriendlyNameOverride = ev.target.value.trim();
@@ -2953,6 +2968,14 @@ class AlexLightStudioPanel extends HTMLElement {
     });
     this.shadowRoot.querySelector("#gradient-test-btn").addEventListener("click", () => this._testGradient());
     this.shadowRoot.querySelector("#gradient-save-btn").addEventListener("click", () => this._saveGradientScene());
+  }
+
+  _updateGradientHuePointsVisibility() {
+    const show = this._gradientDeviceType === "hue" ? "" : "none";
+    ["#gradient-hue-points-row", "#gradient-hue-points-hint"].forEach((sel) => {
+      const el = this.shadowRoot.querySelector(sel);
+      if (el) el.style.display = show;
+    });
   }
 
   _populateGradientEntitySelect() {
@@ -3050,7 +3073,7 @@ class AlexLightStudioPanel extends HTMLElement {
   }
 
   async _resolveGradientSegments(entityId) {
-    if (this._gradientDeviceType !== "aqara") return this._gradientStops.length;
+    if (this._gradientDeviceType !== "aqara") return this._gradientHuePoints || this._gradientStops.length;
     const lengthEntity = gradientDefaultLengthEntity(entityId);
     const st = lengthEntity && this._hass.states[lengthEntity];
     if (st && st.state != null && !Number.isNaN(Number(st.state))) {
@@ -3129,6 +3152,7 @@ class AlexLightStudioPanel extends HTMLElement {
     if (!this._gradientTestEntity) return;
     const data = { entity_id: this._gradientTestEntity, name, device_type: this._gradientDeviceType };
     if (this._gradientFriendlyNameOverride) data.friendly_name = this._gradientFriendlyNameOverride;
+    if (this._gradientDeviceType === "hue" && this._gradientHuePoints) data.segments = this._gradientHuePoints;
     await this._hass.callService("alex_light_studio", "load_scene", data);
   }
 
