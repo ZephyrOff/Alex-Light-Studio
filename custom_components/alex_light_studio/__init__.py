@@ -837,7 +837,10 @@ async def _async_recompute_strip(hass: HomeAssistant, entry_id: str, strip_id: s
     friendly_name = strip.get("friendly_name") or attr_friendly_name or object_id
 
     segments = _resolve_strip_segments(hass, strip)
-    colors = compute_zone_colors(zones_for_strip, segments, blend=strip.get("zone_blend", 0))
+    # Segment inactif : noir sur Aqara (s'eteint), mais une Hue convertit le
+    # noir en xy et l'affiche en bleu -> blanc a la place.
+    idle_color = "#000000" if device_type == DEVICE_TYPE_AQARA else "#ffffff"
+    colors = compute_zone_colors(zones_for_strip, segments, idle_color=idle_color, blend=strip.get("zone_blend", 0))
 
     # Luminosite native du bandeau (0-255 HA -> 0-254 Z2M) plutot que cuite
     # dans chaque couleur RVB -- voir AlexLightStudioZoneLight.rgb_color_hex
