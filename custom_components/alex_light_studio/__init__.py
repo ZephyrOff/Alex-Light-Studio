@@ -460,17 +460,28 @@ def _sync_zones_from_strip_command(hass: HomeAssistant, entry_id: str, topic: st
             # eteintes : l'appareil reprend sa derniere couleur, qu'on ne
             # connait qu'une fois son etat rapporte -> lecture differee de
             # l'entite du bandeau, puis alignement des zones dessus.
-            async_call_later(
-                hass,
-                1.5,
-                lambda _now, ents=zone_entities, eid=strip["entity"]: _sync_zones_from_entity_state(hass, eid, ents),
-            )
+            _LOGGER.debug("Allumage externe du bandeau %s : alignement des zones differe", strip["entity"])
+            # Deux passes : la 1re allume les zones meme si l'appareil n'a pas
+            # encore rapporte son etat, la 2e (plus tard) affine la couleur.
+            for delay in (1.0, 4.0):
+                async_call_later(
+                    hass,
+                    delay,
+                    lambda _now, ents=zone_entities, eid=strip["entity"]: _sync_zones_from_entity_state(
+                        hass, eid, ents
+                    ),
+                )
 
 
 @callback
 def _sync_zones_from_entity_state(hass: HomeAssistant, strip_entity_id: str, zone_entities: list) -> None:
     state = hass.states.get(strip_entity_id)
-    if state is None or state.state != "on":
+    if state is None or state.state == "off":
+        # La commande ON a ete emise mais l'etat n'est pas (encore) rapporte :
+        # on allume quand meme les zones, en gardant leur couleur actuelle.
+        if state is not None and not any(e.is_on for e in zone_entities):
+            for entity in zone_entities:
+                entity.sync_from_strip(on=True)
         return
     attrs = state.attributes
     hs = kelvin = None
