@@ -47,6 +47,7 @@ from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.storage import Store
 from homeassistant.util import color as color_util
 from homeassistant.util import slugify
@@ -430,8 +431,7 @@ def _sync_zones_from_strip_command(hass: HomeAssistant, entry_id: str, topic: st
             hs = color_util.color_RGB_to_hs(color["r"], color["g"], color["b"])
     if data.get("color_temp"):
         kelvin = round(1_000_000 / float(data["color_temp"]))
-    if not off and hs is None and kelvin is None:
-        return
+    plain_on = not off and hs is None and kelvin is None
 
     name = topic[len(Z2M_BASE_TOPIC) + 1 : -len("/set")].lower()
     entry_data = hass.data[DOMAIN][entry_id]
@@ -440,10 +440,46 @@ def _sync_zones_from_strip_command(hass: HomeAssistant, entry_id: str, topic: st
         strip_name = strip.get("friendly_name") or (_z2m_name_for(state) if state else strip["entity"].split(".", 1)[1])
         if strip_name.lower() != name:
             continue
-        for zid, cfg in entry_data["light_zones"].items():
-            entity = entry_data.get("zone_entities", {}).get(zid)
-            if cfg.get("strip_id") == strip_id and entity is not None:
+        zone_entities = [
+            entry_data["zone_entities"][zid]
+            for zid, cfg in entry_data["light_zones"].items()
+            if cfg.get("strip_id") == strip_id and zid in entry_data.get("zone_entities", {})
+        ]
+        if not plain_on:
+            for entity in zone_entities:
                 entity.sync_from_strip(on=not off, hs=hs, kelvin=kelvin, brightness=data.get("brightness"))
+        elif any(e.is_on for e in zone_entities):
+            # Bandeau deja piloté par ses zones : un simple ON / changement de
+            # luminosite ne doit pas ecraser leurs couleurs individuelles.
+            if data.get("brightness") is not None:
+                for entity in zone_entities:
+                    if entity.is_on:
+                        entity.sync_brightness(min(255, int(data["brightness"])))
+        else:
+            # Allumage du bandeau entier alors que toutes les zones etaient
+            # eteintes : l'appareil reprend sa derniere couleur, qu'on ne
+            # connait qu'une fois son etat rapporte -> lecture differee de
+            # l'entite du bandeau, puis alignement des zones dessus.
+            async_call_later(
+                hass,
+                1.5,
+                lambda _now, ents=zone_entities, eid=strip["entity"]: _sync_zones_from_entity_state(hass, eid, ents),
+            )
+
+
+@callback
+def _sync_zones_from_entity_state(hass: HomeAssistant, strip_entity_id: str, zone_entities: list) -> None:
+    state = hass.states.get(strip_entity_id)
+    if state is None or state.state != "on":
+        return
+    attrs = state.attributes
+    hs = kelvin = None
+    if attrs.get("color_mode") == "color_temp" and attrs.get("color_temp_kelvin"):
+        kelvin = attrs["color_temp_kelvin"]
+    elif attrs.get("hs_color"):
+        hs = tuple(attrs["hs_color"])
+    for entity in zone_entities:
+        entity.sync_from_strip(on=True, hs=hs, kelvin=kelvin, brightness=attrs.get("brightness"))
 
 
 def _capture_snapshot_entity(state, include_effects: bool) -> dict:
