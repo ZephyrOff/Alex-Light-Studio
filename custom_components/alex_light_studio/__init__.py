@@ -367,10 +367,48 @@ _SNAPSHOT_COLOR_ATTR = {
 Z2M_BASE_TOPIC = "zigbee2mqtt"
 
 
-def _z2m_name_for(state) -> str:
-    """Nom Z2M d'une entite (meme regle que load_scene : friendly_name HA,
-    sinon dernier segment de l'entity_id)."""
-    return state.attributes.get("friendly_name") or state.entity_id.split(".", 1)[1]
+_IEEE_RE = re.compile(r"0x[0-9a-fA-F]{16}")
+
+
+def _store_z2m_devices(hass: HomeAssistant, payload) -> None:
+    """Memorise la table {adresse IEEE: friendly_name} publiee (retenue) par
+    Z2M sur bridge/devices."""
+    try:
+        devices = json.loads(payload)
+    except (TypeError, ValueError):
+        return
+    if isinstance(devices, list):
+        hass.data.setdefault(DOMAIN, {})["z2m_devices"] = {
+            d["ieee_address"].lower(): d["friendly_name"]
+            for d in devices
+            if isinstance(d, dict) and d.get("ieee_address") and d.get("friendly_name")
+        }
+
+
+def _z2m_name_for_entity(hass: HomeAssistant, entity_id: str, explicit: str | None = None) -> str:
+    """Nom Z2M (topic MQTT) d'une entite. Priorite : nom explicite saisi >
+    nom reel Z2M retrouve via l'adresse IEEE de l'appareil (extraite du
+    unique_id de l'entite, croisee avec bridge/devices) > friendly_name HA >
+    dernier segment de l'entity_id. L'avant-derniere etape est la plus
+    fiable : le friendly_name HA diverge du vrai nom Z2M des qu'on renomme
+    l'entite ou l'appareil cote HA, et le message part alors sur un topic
+    que Z2M n'ecoute pas (aucune erreur, rien ne bouge)."""
+    if explicit:
+        return explicit
+    entry = er.async_get(hass).async_get(entity_id)
+    if entry is not None and entry.unique_id:
+        match = _IEEE_RE.search(str(entry.unique_id))
+        if match:
+            name = hass.data.get(DOMAIN, {}).get("z2m_devices", {}).get(match.group(0).lower())
+            if name:
+                return name
+    state = hass.states.get(entity_id)
+    attr_name = state.attributes.get("friendly_name") if state else None
+    return attr_name or entity_id.split(".", 1)[1]
+
+
+def _z2m_name_for(hass: HomeAssistant, state) -> str:
+    return _z2m_name_for_entity(hass, state.entity_id)
 
 
 def _track_segments(cache: dict, topic: str, payload) -> None:
@@ -437,7 +475,7 @@ def _sync_zones_from_strip_command(hass: HomeAssistant, entry_id: str, topic: st
     entry_data = hass.data[DOMAIN][entry_id]
     for strip_id, strip in entry_data["strips"].items():
         state = hass.states.get(strip["entity"])
-        strip_name = strip.get("friendly_name") or (_z2m_name_for(state) if state else strip["entity"].split(".", 1)[1])
+        strip_name = _z2m_name_for_entity(hass, strip["entity"], strip.get("friendly_name"))
         if strip_name.lower() != name:
             continue
         zone_entities = [
@@ -558,6 +596,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     @callback
     def _on_z2m_message(msg) -> None:
+        if msg.topic == f"{Z2M_BASE_TOPIC}/bridge/devices":
+            _store_z2m_devices(hass, msg.payload)
+            return
         _track_segments(segment_cache, msg.topic, msg.payload)
         _sync_zones_from_strip_command(hass, entry.entry_id, msg.topic, msg.payload)
     try:
@@ -630,9 +671,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # d'origine comprise) > dernier segment de l'entity_id, "slugifie"
         # par HA (minuscules) et donc parfois divergent du vrai nom Z2M des
         # que celui-ci contient de la casse mixte.
-        entity_state = hass.states.get(entity_id)
-        attr_friendly_name = entity_state.attributes.get("friendly_name") if entity_state else None
-        friendly_name = call.data.get("friendly_name") or attr_friendly_name or object_id
+        friendly_name = _z2m_name_for_entity(hass, entity_id, call.data.get("friendly_name"))
 
         segments = call.data.get("segments")
         if segments is None and device_type == DEVICE_TYPE_AQARA:
@@ -683,9 +722,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.debug("Entite ignoree dans l'instantane (etat indisponible): %s", entity_id)
                 continue
             captured[entity_id] = _capture_snapshot_entity(state, include_effects)
-            segments = segment_cache.get(_z2m_name_for(state).lower())
+            segments = segment_cache.get(_z2m_name_for(hass, state).lower())
             if segments and captured[entity_id]["state"] == "on" and state.domain == "light":
-                captured[entity_id]["z2m_name"] = _z2m_name_for(state)
+                captured[entity_id]["z2m_name"] = _z2m_name_for(hass, state)
                 captured[entity_id]["segments"] = segments
         snapshots = hass.data[DOMAIN][entry.entry_id]["snapshots"]
         snapshots[call.data["name"]] = {"entities": captured, "include_effects": include_effects}
@@ -878,10 +917,7 @@ async def _async_recompute_strip(hass: HomeAssistant, entry_id: str, strip_id: s
         return
 
     device_type = strip["device_type"]
-    object_id = entity_id.split(".", 1)[1] if "." in entity_id else entity_id
-    entity_state = hass.states.get(entity_id)
-    attr_friendly_name = entity_state.attributes.get("friendly_name") if entity_state else None
-    friendly_name = strip.get("friendly_name") or attr_friendly_name or object_id
+    friendly_name = _z2m_name_for_entity(hass, entity_id, strip.get("friendly_name"))
 
     segments = _resolve_strip_segments(hass, strip)
     # Segment inactif : noir sur Aqara (s'eteint), mais une Hue convertit le
@@ -918,8 +954,9 @@ async def _async_recompute_strip(hass: HomeAssistant, entry_id: str, strip_id: s
         blocking=True,
     )
     _LOGGER.debug(
-        "Zones recalculees pour %s (%d segments, %s) : %d zone(s) active(s)",
+        "Zones recalculees pour %s -> zigbee2mqtt/%s/set (%d segments, %s) : %d zone(s) active(s)",
         entity_id,
+        friendly_name,
         segments,
         device_type,
         sum(1 for z in zones_for_strip if z["is_on"]),
